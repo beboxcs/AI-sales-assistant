@@ -1,2 +1,1 @@
-<<<<<<< HEAD
 # AI-sales-assistant
