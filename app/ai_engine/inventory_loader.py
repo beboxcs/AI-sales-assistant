@@ -1,5 +1,6 @@
 from datetime import date
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -104,6 +105,117 @@ def normalize_status(value: Any) -> Any:
     return status_map.get(normalized_value.lower(), value)
 
 
+def normalize_money(value: Any) -> Any:
+    if _is_missing(value):
+        return value
+    if _is_number(value):
+        return float(value)
+    if not isinstance(value, str):
+        return value
+
+    normalized_value = value.strip()
+    money_pattern = re.compile(
+        r"^(?:egp\s*)?(\d+(?:\.\d+)?|\d{1,3}(?:,\d{3})+(?:\.\d+)?)"
+        r"(?:\s*(m|million))?$",
+        re.IGNORECASE,
+    )
+    match = money_pattern.fullmatch(normalized_value)
+    if not match:
+        return value
+
+    amount = float(match.group(1).replace(",", ""))
+    multiplier = 1_000_000 if match.group(2) else 1
+    return amount * multiplier
+
+
+def normalize_area(value: Any) -> Any:
+    if _is_missing(value):
+        return value
+    if _is_number(value):
+        return float(value)
+    if not isinstance(value, str):
+        return value
+
+    area_pattern = re.compile(r"^(\d+(?:\.\d+)?)(?:\s*(sqm|m2|m²))?$", re.IGNORECASE)
+    match = area_pattern.fullmatch(value.strip())
+    if not match:
+        return value
+
+    return float(match.group(1))
+
+
+def normalize_integer_count(value: Any, labels: list[str]) -> Any:
+    if _is_missing(value):
+        return value
+    if _is_integer(value):
+        return int(value)
+    if not isinstance(value, str):
+        return value
+
+    escaped_labels = [re.escape(label) for label in labels]
+    count_pattern = re.compile(
+        rf"^(\d+)(?:\s*(?:{'|'.join(escaped_labels)}))?$",
+        re.IGNORECASE,
+    )
+    match = count_pattern.fullmatch(value.strip())
+    if not match:
+        return value
+
+    return int(match.group(1))
+
+
+def normalize_property_type(value: Any) -> Any:
+    if _is_missing(value):
+        return value
+    if not isinstance(value, str):
+        return value
+
+    property_type_map = {
+        "apt": "Apartment",
+        "apartment": "Apartment",
+        "villa": "Villa",
+        "townhouse": "Townhouse",
+        "town house": "Townhouse",
+        "twinhouse": "Twin House",
+        "twin house": "Twin House",
+        "duplex": "Duplex",
+        "penthouse": "Penthouse",
+        "chalet": "Chalet",
+    }
+
+    normalized_value = value.strip().lower()
+    return property_type_map.get(normalized_value, value)
+
+
+def normalize_row_values(row: dict[str, Any]) -> dict[str, Any]:
+    normalized_row = row.copy()
+
+    if "price" in normalized_row:
+        normalized_row["price"] = normalize_money(normalized_row["price"])
+    if "down_payment" in normalized_row:
+        normalized_row["down_payment"] = normalize_money(normalized_row["down_payment"])
+    if "area_sqm" in normalized_row:
+        normalized_row["area_sqm"] = normalize_area(normalized_row["area_sqm"])
+    if "bedrooms" in normalized_row:
+        normalized_row["bedrooms"] = normalize_integer_count(
+            normalized_row["bedrooms"],
+            labels=["br", "bedroom", "bedrooms"],
+        )
+    if "bathrooms" in normalized_row:
+        normalized_row["bathrooms"] = normalize_integer_count(
+            normalized_row["bathrooms"],
+            labels=["bathroom", "bathrooms"],
+        )
+    if "property_type" in normalized_row:
+        normalized_row["property_type"] = normalize_property_type(
+            normalized_row["property_type"]
+        )
+    if "status" in normalized_row:
+        normalized_row["status"] = normalize_status(normalized_row["status"])
+
+    return normalized_row
+
+
 def validate_inventory(
     df: pd.DataFrame,
     source_name: str,
@@ -113,9 +225,7 @@ def validate_inventory(
 
     for row_number, (_, row) in enumerate(df.iterrows(), start=2):
         row_data = _clean_missing_values(row.to_dict())
-
-        if "status" in row_data:
-            row_data["status"] = normalize_status(row_data["status"])
+        row_data = normalize_row_values(row_data)
 
         if _is_missing(row_data.get("source")):
             row_data["source"] = source_name
@@ -186,3 +296,17 @@ def _is_missing(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip() == ""
     return bool(pd.isna(value))
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _is_integer(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return value.is_integer()
+    return False

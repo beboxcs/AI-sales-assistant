@@ -6,7 +6,11 @@ import pytest
 
 from app.ai_engine.inventory_loader import (
     map_column_aliases,
+    normalize_area,
     normalize_column_names,
+    normalize_integer_count,
+    normalize_money,
+    normalize_property_type,
     process_inventory,
 )
 from app.ai_engine.schemas import UnitStatus
@@ -85,6 +89,91 @@ def test_map_column_aliases_raises_on_collision():
 
     with pytest.raises(ValueError, match="compound_name"):
         map_column_aliases(df)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("EGP 5,500,000", 5500000.0),
+        ("5.5M", 5500000.0),
+        ("5.5 million", 5500000.0),
+        (5500000, 5500000.0),
+    ],
+)
+def test_normalize_money_parses_deterministic_values(value, expected):
+    assert normalize_money(value) == expected
+
+
+@pytest.mark.parametrize("value", ["around 5M", "starting from 5M", "contact for price"])
+def test_normalize_money_leaves_ambiguous_values(value):
+    assert normalize_money(value) == value
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("150 sqm", 150.0),
+        ("150 m2", 150.0),
+        ("150 m²", 150.0),
+    ],
+)
+def test_normalize_area_parses_square_meter_values(value, expected):
+    assert normalize_area(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "labels", "expected"),
+    [
+        ("3 BR", ["br", "bedroom", "bedrooms"], 3),
+        ("3 bedrooms", ["br", "bedroom", "bedrooms"], 3),
+        ("2 bathrooms", ["bathroom", "bathrooms"], 2),
+    ],
+)
+def test_normalize_integer_count_parses_labeled_counts(value, labels, expected):
+    assert normalize_integer_count(value, labels) == expected
+
+
+@pytest.mark.parametrize("value", ["3-4 bedrooms", "3+ bedrooms", "studio"])
+def test_normalize_integer_count_leaves_ambiguous_values(value):
+    assert normalize_integer_count(value, ["br", "bedroom", "bedrooms"]) == value
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("apt", "Apartment"),
+        ("TOWN HOUSE", "Townhouse"),
+        ("twinhouse", "Twin House"),
+    ],
+)
+def test_normalize_property_type_maps_safe_aliases(value, expected):
+    assert normalize_property_type(value) == expected
+
+
+def test_normalize_property_type_leaves_unknown_values():
+    assert normalize_property_type("Loft") == "Loft"
+
+
+def test_process_inventory_normalizes_messy_values():
+    file_path = Path("data/sample_messy_inventory.csv")
+
+    valid_units, errors = process_inventory(file_path)
+
+    assert errors == [], _format_errors(errors)
+    assert len(valid_units) == 1
+
+    unit = valid_units[0]
+    assert unit.unit_id == "M901"
+    assert unit.compound_name == "River Walk"
+    assert unit.property_type == "Twin House"
+    assert unit.price == 5500000.0
+    assert unit.down_payment == 550000.0
+    assert unit.area_sqm == 150.0
+    assert unit.bedrooms == 3
+    assert unit.bathrooms == 2
+    assert unit.status == UnitStatus.AVAILABLE
+    assert unit.source == file_path.name
+    assert unit.last_updated == date.today()
 
 
 def _format_errors(errors):
