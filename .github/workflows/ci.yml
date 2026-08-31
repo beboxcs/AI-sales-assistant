@@ -1,15 +1,17 @@
 name: CI
 
+# Run CI whenever code is pushed to ANY branch
+# and whenever a Pull Request targets main.
 on:
   push:
-    branches:
-      - main
+
   pull_request:
     branches:
       - main
 
 jobs:
   test:
+    name: Run Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +32,7 @@ jobs:
         run: pytest
 
   docker-build:
+    name: Build Docker Image
     runs-on: ubuntu-latest
 
     steps:
