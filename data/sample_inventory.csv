@@ -1,0 +1,7 @@
+unit_id,compound_name,location,property_type,price,status,source,last_updated,bedrooms,bathrooms,area_sqm,down_payment,installment_years,delivery_date
+A101,Nile Gardens,New Cairo,Apartment,4200000,available,, ,3,2,145,420000,7,2028-06-30
+B205,West Park,6th of October,Townhouse,7800000,HOLD,developer_feed,2026-08-31,4,3,230,780000,8,2027-12-15
+C310,Marina Bay,North Coast,Chalet,3600000,Reserved,,2026-08-30,2,1,95,360000,5,2026-09-01
+D412,Capital Heights,New Administrative Capital,Duplex,9100000,sold,sales_sheet,,4,4,280,910000,6,2029-03-20
+E118,Green Valley,Mostakbal City,Apartment,-2500000,Available,,2026-08-29,2,2,120,250000,7,2028-01-10
+F506,Lake View Residence,Sheikh Zayed,Villa,12500000,Unknown,broker_import,2026-08-28,5,5,410,1250000,10,2029-11-01
