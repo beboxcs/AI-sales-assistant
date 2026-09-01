@@ -1,7 +1,5 @@
 name: CI
 
-# Run CI whenever code is pushed to ANY branch
-# and whenever a Pull Request targets main.
 on:
   push:
 
@@ -29,7 +27,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run tests
-        run: pytest
+        shell: bash
+        run: |
+          set +e
+          pytest
+          code=$?
+          set -e
+
+          if [ "$code" -eq 5 ]; then
+            echo "No tests found yet - skipping test failure."
+            exit 0
+          fi
+
+          exit "$code"
 
   docker-build:
     name: Build Docker Image
