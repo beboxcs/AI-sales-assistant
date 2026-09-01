@@ -41,13 +41,44 @@ jobs:
 
           exit "$code"
 
-  docker-build:
-    name: Build Docker Image
+  docker-check:
+    name: Docker Runtime Check
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t ai-sales-assistant .
+      - name: Build and start containers
+        run: docker compose up -d --build
+
+      - name: Show running containers
+        run: docker compose ps
+
+      - name: Wait for FastAPI
+        shell: bash
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:8000/docs; then
+              echo "FastAPI is running."
+              exit 0
+            fi
+
+            echo "Waiting for FastAPI..."
+            sleep 2
+          done
+
+          echo "FastAPI did not start in time."
+          docker compose logs
+          exit 1
+
+      - name: Check PostgreSQL
+        run: docker compose exec -T db pg_isready -U postgres
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop containers
+        if: always()
+        run: docker compose down -v
