@@ -1,140 +1,307 @@
+import json
 from datetime import date
 
 import pytest
 
 from app.ai_engine.change_detector import (
     InventoryChangeType,
+    PaymentPlanChangeType,
     detect_inventory_changes,
 )
-from app.ai_engine.schemas import UnitSchema, UnitStatus
+from app.ai_engine.schemas import (
+    InventorySnapshot,
+    PaymentMethod,
+    PaymentPlanSchema,
+    UnitSchema,
+    UnitStatus,
+)
+
+
+def test_detect_inventory_changes_raises_for_scope_mismatch():
+    with pytest.raises(ValueError, match="scope_key"):
+        detect_inventory_changes(
+            _snapshot(scope_key="scope:a", units=[_unit()]),
+            _snapshot(scope_key="scope:b", units=[_unit()]),
+        )
 
 
 def test_detect_inventory_changes_returns_empty_for_no_changes():
-    previous = [_unit()]
-    current = [_unit()]
-
-    assert detect_inventory_changes(previous, current) == []
+    assert detect_inventory_changes(_snapshot(units=[_unit()]), _snapshot(units=[_unit()])) == []
 
 
 def test_detect_inventory_changes_reports_added_unit():
-    previous = [_unit(unit_id="A101")]
-    current = [_unit(unit_id="A101"), _unit(unit_id="A102")]
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(external_unit_id="A101")]),
+        _snapshot(units=[_unit(external_unit_id="A101"), _unit(external_unit_id="A102")]),
+    )
 
-    changes = detect_inventory_changes(previous, current)
-
-    assert len(changes) == 1
-    assert changes[0].unit_id == "A102"
+    assert [change.external_unit_id for change in changes] == ["A102"]
     assert changes[0].change_type == InventoryChangeType.ADDED
     assert changes[0].changes == {}
+    assert changes[0].payment_plan_changes == []
 
 
 def test_detect_inventory_changes_reports_missing_unit_without_marking_sold():
-    previous = [_unit(unit_id="A101"), _unit(unit_id="A102")]
-    current = [_unit(unit_id="A101")]
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(external_unit_id="A101"), _unit(external_unit_id="A102")]),
+        _snapshot(units=[_unit(external_unit_id="A101")]),
+    )
 
-    changes = detect_inventory_changes(previous, current)
-
-    assert len(changes) == 1
-    assert changes[0].unit_id == "A102"
+    assert [change.external_unit_id for change in changes] == ["A102"]
     assert changes[0].change_type == InventoryChangeType.MISSING
-    assert changes[0].change_type != InventoryChangeType.UPDATED
     assert "status" not in changes[0].changes
 
 
-def test_detect_inventory_changes_reports_price_update_only():
-    previous = [_unit(price=5500000.0)]
-    current = [_unit(price=5800000.0)]
-
-    changes = detect_inventory_changes(previous, current)
-
-    assert len(changes) == 1
-    assert changes[0].change_type == InventoryChangeType.UPDATED
-    assert set(changes[0].changes) == {"price"}
-    assert changes[0].changes["price"].old == 5500000.0
-    assert changes[0].changes["price"].new == 5800000.0
-
-
-def test_detect_inventory_changes_reports_status_update():
-    previous = [_unit(status=UnitStatus.AVAILABLE)]
-    current = [_unit(status=UnitStatus.SOLD)]
-
-    changes = detect_inventory_changes(previous, current)
+def test_detect_inventory_changes_reports_base_price_update():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(base_price=5500000.0)]),
+        _snapshot(units=[_unit(base_price=5800000.0)]),
+    )
 
     assert len(changes) == 1
     assert changes[0].change_type == InventoryChangeType.UPDATED
-    assert changes[0].changes["status"].old == "Available"
-    assert changes[0].changes["status"].new == "Sold"
+    assert set(changes[0].changes) == {"base_price"}
+    assert changes[0].changes["base_price"].old == 5500000.0
+    assert changes[0].changes["base_price"].new == 5800000.0
+    assert isinstance(changes[0].changes["base_price"].old, float)
+    assert isinstance(changes[0].changes["base_price"].new, float)
 
 
-def test_detect_inventory_changes_groups_multiple_field_updates():
-    previous = [_unit(price=5500000.0, status=UnitStatus.AVAILABLE, bedrooms=2)]
-    current = [_unit(price=5800000.0, status=UnitStatus.RESERVED, bedrooms=3)]
+def test_detect_inventory_changes_serializes_delivery_date_changes_as_iso_strings():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(delivery_date=date(2027, 5, 1))]),
+        _snapshot(units=[_unit(delivery_date=date(2028, 6, 15))]),
+    )
 
-    changes = detect_inventory_changes(previous, current)
+    delivery_change = changes[0].changes["delivery_date"]
+    assert delivery_change.old == "2027-05-01"
+    assert delivery_change.new == "2028-06-15"
 
-    assert len(changes) == 1
-    assert changes[0].change_type == InventoryChangeType.UPDATED
-    assert set(changes[0].changes) == {"price", "status", "bedrooms"}
-    assert changes[0].changes["price"].new == 5800000.0
-    assert changes[0].changes["status"].new == "Reserved"
-    assert changes[0].changes["bedrooms"].new == 3
+
+def test_detect_inventory_changes_serializes_enum_changes_as_readable_values():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(status=UnitStatus.AVAILABLE)]),
+        _snapshot(units=[_unit(status=UnitStatus.SOLD)]),
+    )
+
+    status_change = changes[0].changes["status"]
+    assert status_change.old == "Available"
+    assert status_change.new == "Sold"
 
 
 def test_detect_inventory_changes_ignores_metadata_only_updates():
-    previous = [
-        _unit(source="previous.csv", last_updated=date(2026, 8, 31)),
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(source="previous.csv", last_updated=date(2026, 8, 31))]),
+        _snapshot(units=[_unit(source="current.csv", last_updated=date(2026, 9, 1))]),
+    )
+
+    assert changes == []
+
+
+def test_detect_inventory_changes_reports_payment_plan_added():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(payment_plans=[_plan(plan_key="terms:cash")])]),
+        _snapshot(
+            units=[
+                _unit(
+                    payment_plans=[
+                        _plan(plan_key="terms:cash"),
+                        _plan(plan_key="name:5_years", plan_name="5 Years"),
+                    ]
+                )
+            ]
+        ),
+    )
+
+    plan_changes = changes[0].payment_plan_changes
+    assert changes[0].change_type == InventoryChangeType.UPDATED
+    assert changes[0].changes == {}
+    assert len(plan_changes) == 1
+    assert plan_changes[0].plan_key == "name:5_years"
+    assert plan_changes[0].change_type == PaymentPlanChangeType.ADDED
+
+
+def test_detect_inventory_changes_reports_payment_plan_missing():
+    changes = detect_inventory_changes(
+        _snapshot(
+            units=[
+                _unit(
+                    payment_plans=[
+                        _plan(plan_key="terms:cash"),
+                        _plan(plan_key="name:5_years", plan_name="5 Years"),
+                    ]
+                )
+            ]
+        ),
+        _snapshot(units=[_unit(payment_plans=[_plan(plan_key="terms:cash")])]),
+    )
+
+    plan_changes = changes[0].payment_plan_changes
+    assert len(plan_changes) == 1
+    assert plan_changes[0].plan_key == "name:5_years"
+    assert plan_changes[0].change_type == PaymentPlanChangeType.MISSING
+
+
+def test_detect_inventory_changes_reports_payment_plan_updated():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(payment_plans=[_plan(total_price=5800000.0)])]),
+        _snapshot(units=[_unit(payment_plans=[_plan(total_price=6000000.0)])]),
+    )
+
+    plan_changes = changes[0].payment_plan_changes
+    assert len(plan_changes) == 1
+    assert plan_changes[0].change_type == PaymentPlanChangeType.UPDATED
+    assert set(plan_changes[0].changes) == {"total_price"}
+    assert plan_changes[0].changes["total_price"].old == 5800000.0
+    assert plan_changes[0].changes["total_price"].new == 6000000.0
+
+
+def test_inventory_change_model_dump_json_contains_json_compatible_values():
+    changes = detect_inventory_changes(
+        _snapshot(
+            units=[
+                _unit(
+                    delivery_date=date(2027, 5, 1),
+                    payment_plans=[_plan(payment_method=PaymentMethod.INSTALLMENT)],
+                )
+            ]
+        ),
+        _snapshot(
+            units=[
+                _unit(
+                    delivery_date=date(2028, 6, 15),
+                    payment_plans=[
+                        _plan(
+                            payment_method=PaymentMethod.CASH,
+                            installment_years=None,
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
+
+    dumped_change = changes[0].model_dump(mode="json")
+
+    json.dumps(dumped_change)
+    assert dumped_change["changes"]["delivery_date"]["old"] == "2027-05-01"
+    assert dumped_change["payment_plan_changes"][0]["changes"]["payment_method"] == {
+        "old": "Installment",
+        "new": "Cash",
+    }
+
+
+def test_detect_inventory_changes_reports_multiple_payment_plan_changes():
+    changes = detect_inventory_changes(
+        _snapshot(
+            units=[
+                _unit(
+                    payment_plans=[
+                        _plan(plan_key="name:5_years", plan_name="5 Years", total_price=5800000.0),
+                        _plan(plan_key="name:7_years", plan_name="7 Years"),
+                    ]
+                )
+            ]
+        ),
+        _snapshot(
+            units=[
+                _unit(
+                    payment_plans=[
+                        _plan(plan_key="name:5_years", plan_name="5 Years", total_price=6000000.0),
+                        _plan(
+                            plan_key="terms:cash",
+                            payment_method=PaymentMethod.CASH,
+                            installment_years=None,
+                        ),
+                    ]
+                )
+            ]
+        ),
+    )
+
+    plan_changes = changes[0].payment_plan_changes
+    assert [plan_change.plan_key for plan_change in plan_changes] == [
+        "name:5_years",
+        "name:7_years",
+        "terms:cash",
     ]
-    current = [
-        _unit(source="current.csv", last_updated=date(2026, 9, 1)),
+    assert [plan_change.change_type for plan_change in plan_changes] == [
+        PaymentPlanChangeType.UPDATED,
+        PaymentPlanChangeType.MISSING,
+        PaymentPlanChangeType.ADDED,
     ]
 
-    assert detect_inventory_changes(previous, current) == []
+
+def test_detect_inventory_changes_treats_changed_plan_key_as_missing_and_added():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(payment_plans=[_plan(plan_key="name:5_years")])]),
+        _snapshot(units=[_unit(payment_plans=[_plan(plan_key="name:7_years", plan_name="7 Years")])]),
+    )
+
+    plan_changes = changes[0].payment_plan_changes
+    assert [plan_change.plan_key for plan_change in plan_changes] == [
+        "name:5_years",
+        "name:7_years",
+    ]
+    assert [plan_change.change_type for plan_change in plan_changes] == [
+        PaymentPlanChangeType.MISSING,
+        PaymentPlanChangeType.ADDED,
+    ]
 
 
-def test_detect_inventory_changes_raises_for_duplicate_previous_unit_id():
-    previous = [_unit(unit_id="A101"), _unit(unit_id="A101")]
-    current = [_unit(unit_id="A101")]
+def test_detect_inventory_changes_orders_unit_changes_deterministically():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(external_unit_id="B"), _unit(external_unit_id="A")]),
+        _snapshot(units=[_unit(external_unit_id="C"), _unit(external_unit_id="A", base_price=1)]),
+    )
 
-    with pytest.raises(ValueError, match="previous snapshot"):
-        detect_inventory_changes(previous, current)
-
-
-def test_detect_inventory_changes_raises_for_duplicate_current_unit_id():
-    previous = [_unit(unit_id="A101")]
-    current = [_unit(unit_id="A101"), _unit(unit_id="A101")]
-
-    with pytest.raises(ValueError, match="current snapshot"):
-        detect_inventory_changes(previous, current)
+    assert [change.external_unit_id for change in changes] == ["A", "B", "C"]
 
 
 def test_detect_inventory_changes_does_not_mutate_inputs():
-    previous = [_unit(price=5500000.0)]
-    current = [_unit(price=5800000.0)]
-    previous_before = [unit.model_dump() for unit in previous]
-    current_before = [unit.model_dump() for unit in current]
+    previous = _snapshot(units=[_unit(payment_plans=[_plan(total_price=5800000.0)])])
+    current = _snapshot(units=[_unit(payment_plans=[_plan(total_price=6000000.0)])])
+    previous_before = previous.model_dump()
+    current_before = current.model_dump()
 
     detect_inventory_changes(previous, current)
 
-    assert [unit.model_dump() for unit in previous] == previous_before
-    assert [unit.model_dump() for unit in current] == current_before
+    assert previous.model_dump() == previous_before
+    assert current.model_dump() == current_before
+
+
+def _snapshot(scope_key="developer:demo", units=None) -> InventorySnapshot:
+    return InventorySnapshot(scope_key=scope_key, units=units or [])
+
+
+def _plan(**overrides) -> PaymentPlanSchema:
+    data = {
+        "plan_key": "name:5_years",
+        "plan_name": "5 Years",
+        "payment_method": PaymentMethod.INSTALLMENT,
+        "down_payment": 550000.0,
+        "installment_years": 5.0,
+        "total_price": 5800000.0,
+    }
+    data.update(overrides)
+    return PaymentPlanSchema(**data)
 
 
 def _unit(**overrides) -> UnitSchema:
     data = {
-        "unit_id": "A101",
+        "external_unit_id": "A101",
         "compound_name": "Nile Gardens",
         "location": "New Cairo",
         "property_type": "Apartment",
-        "price": 5500000.0,
+        "base_price": 5500000.0,
         "status": UnitStatus.AVAILABLE,
         "source": "sample.csv",
         "last_updated": date(2026, 9, 1),
         "bedrooms": 3,
         "bathrooms": 2,
         "area_sqm": 150.0,
-        "down_payment": 550000.0,
-        "installment_years": 7.0,
         "delivery_date": date(2028, 6, 30),
+        "payment_plans": [_plan()],
     }
     data.update(overrides)
     return UnitSchema(**data)

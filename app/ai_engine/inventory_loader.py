@@ -1,4 +1,5 @@
 from datetime import date
+from numbers import Integral, Real
 from pathlib import Path
 import re
 from typing import Any
@@ -6,15 +7,15 @@ from typing import Any
 import pandas as pd
 from pydantic import ValidationError
 
-from app.ai_engine.schemas import UnitSchema
+from app.ai_engine.schemas import Currency, PaymentMethod, PaymentPlanSchema, UnitSchema
 
 
 COLUMN_ALIASES: dict[str, str] = {
-    "id": "unit_id",
-    "unit": "unit_id",
-    "unit_code": "unit_id",
-    "unit_number": "unit_id",
-    "unit_no": "unit_id",
+    "unit": "external_unit_id",
+    "unit_code": "external_unit_id",
+    "unit_id": "external_unit_id",
+    "unit_number": "external_unit_id",
+    "unit_no": "external_unit_id",
     "compound": "compound_name",
     "project": "compound_name",
     "project_name": "compound_name",
@@ -26,9 +27,13 @@ COLUMN_ALIASES: dict[str, str] = {
     "type": "property_type",
     "unit_type": "property_type",
     "property": "property_type",
-    "total_price": "price",
-    "selling_price": "price",
-    "unit_price": "price",
+    # Compatibility only: generic price semantics are source-dependent.
+    # Production source-specific mappings should override or replace this.
+    "price": "base_price",
+    "total_base_price": "base_price",
+    "base_unit_price": "base_price",
+    "selling_price": "base_price",
+    "unit_price": "base_price",
     "beds": "bedrooms",
     "bedroom": "bedrooms",
     "no_of_bedrooms": "bedrooms",
@@ -39,6 +44,7 @@ COLUMN_ALIASES: dict[str, str] = {
     "built_up_area": "area_sqm",
     "availability": "status",
     "unit_status": "status",
+    "base_currency_code": "base_currency",
     "data_source": "source",
     "source_name": "source",
     "provider": "source",
@@ -49,11 +55,49 @@ COLUMN_ALIASES: dict[str, str] = {
     "delivery": "delivery_date",
     "handover_date": "delivery_date",
     "completion_date": "delivery_date",
+    "plan_id": "source_plan_id",
+    "payment_plan_id": "source_plan_id",
+    "plan": "plan_name",
+    "payment_plan": "plan_name",
+    "payment_plan_name": "plan_name",
+    "payment_method": "payment_method",
+    "payment_type": "payment_method",
     "downpayment": "down_payment",
     "down_payment_amount": "down_payment",
     "installment_year": "installment_years",
+    "installment_years": "installment_years",
+    "payment_years": "installment_years",
     "years": "installment_years",
+    "plan_total_price": "total_price",
+    "payment_plan_price": "total_price",
+    "currency_code": "currency",
 }
+
+UNIT_LEVEL_FIELDS: tuple[str, ...] = (
+    "external_unit_id",
+    "compound_name",
+    "location",
+    "property_type",
+    "base_price",
+    "base_currency",
+    "status",
+    "bedrooms",
+    "bathrooms",
+    "area_sqm",
+    "delivery_date",
+    "source",
+    "last_updated",
+)
+
+PAYMENT_PLAN_FIELDS: tuple[str, ...] = (
+    "source_plan_id",
+    "plan_name",
+    "payment_method",
+    "down_payment",
+    "installment_years",
+    "total_price",
+    "currency",
+)
 
 
 def load_inventory(file_path: str | Path) -> pd.DataFrame:
@@ -105,6 +149,35 @@ def normalize_status(value: Any) -> Any:
     return status_map.get(normalized_value.lower(), value)
 
 
+def normalize_payment_method(value: Any) -> Any:
+    if _is_missing(value):
+        return value
+    if isinstance(value, PaymentMethod):
+        return value.value
+
+    normalized_value = str(value).strip().lower()
+    payment_method_map = {
+        "cash": "Cash",
+        "installment": "Installment",
+        "installments": "Installment",
+        "installment plan": "Installment",
+    }
+
+    return payment_method_map.get(normalized_value, value)
+
+
+def normalize_currency(value: Any) -> Any:
+    if _is_missing(value):
+        return value
+    if isinstance(value, Currency):
+        return value.value
+
+    normalized_value = str(value).strip().upper()
+    if normalized_value == Currency.EGP.value:
+        return Currency.EGP.value
+    return value
+
+
 def normalize_money(value: Any) -> Any:
     if _is_missing(value):
         return value
@@ -136,7 +209,10 @@ def normalize_area(value: Any) -> Any:
     if not isinstance(value, str):
         return value
 
-    area_pattern = re.compile(r"^(\d+(?:\.\d+)?)(?:\s*(sqm|m2|m²))?$", re.IGNORECASE)
+    area_pattern = re.compile(
+        "^(\\d+(?:\\.\\d+)?)(?:\\s*(sqm|m2|m\u00b2))?$",
+        re.IGNORECASE,
+    )
     match = area_pattern.fullmatch(value.strip())
     if not match:
         return value
@@ -190,10 +266,20 @@ def normalize_property_type(value: Any) -> Any:
 def normalize_row_values(row: dict[str, Any]) -> dict[str, Any]:
     normalized_row = row.copy()
 
-    if "price" in normalized_row:
-        normalized_row["price"] = normalize_money(normalized_row["price"])
+    if "base_price" in normalized_row:
+        normalized_row["base_price"] = normalize_money(normalized_row["base_price"])
+    if "base_currency" in normalized_row:
+        normalized_row["base_currency"] = normalize_currency(normalized_row["base_currency"])
     if "down_payment" in normalized_row:
         normalized_row["down_payment"] = normalize_money(normalized_row["down_payment"])
+    if "total_price" in normalized_row:
+        normalized_row["total_price"] = normalize_money(normalized_row["total_price"])
+    if "currency" in normalized_row:
+        normalized_row["currency"] = normalize_currency(normalized_row["currency"])
+    if "payment_method" in normalized_row:
+        normalized_row["payment_method"] = normalize_payment_method(
+            normalized_row["payment_method"]
+        )
     if "area_sqm" in normalized_row:
         normalized_row["area_sqm"] = normalize_area(normalized_row["area_sqm"])
     if "bedrooms" in normalized_row:
@@ -216,29 +302,121 @@ def normalize_row_values(row: dict[str, Any]) -> dict[str, Any]:
     return normalized_row
 
 
+def generate_plan_key(
+    source_plan_id: Any = None,
+    plan_name: Any = None,
+    payment_method: Any = None,
+    installment_years: Any = None,
+) -> str:
+    if not _is_missing(source_plan_id):
+        return f"source:{_normalize_key_component(source_plan_id)}"
+    if not _is_missing(plan_name):
+        return f"name:{_normalize_key_component(plan_name)}"
+    if not _is_missing(payment_method):
+        normalized_payment_method = normalize_payment_method(payment_method)
+        if normalized_payment_method == PaymentMethod.CASH.value:
+            return "terms:cash"
+        if normalized_payment_method == PaymentMethod.INSTALLMENT.value:
+            if _is_missing(installment_years):
+                raise ValueError(
+                    "Cannot generate installment payment plan key without "
+                    "installment_years"
+                )
+            return f"terms:installment:{_format_number_for_key(installment_years)}"
+
+    raise ValueError("Cannot generate payment plan key from available values")
+
+
 def validate_inventory(
     df: pd.DataFrame,
     source_name: str,
 ) -> tuple[list[UnitSchema], list[dict[str, Any]]]:
-    valid_units: list[UnitSchema] = []
     errors: list[dict[str, Any]] = []
+    grouped_units: dict[str, dict[str, Any]] = {}
 
     for row_number, (_, row) in enumerate(df.iterrows(), start=2):
         row_data = _clean_missing_values(row.to_dict())
         row_data = normalize_row_values(row_data)
 
-        if _is_missing(row_data.get("source")):
-            row_data["source"] = source_name
+        if _is_missing(row_data.get("external_unit_id")):
+            errors.append(
+                _validation_error(
+                    row_number,
+                    "external_unit_id is required for inventory rows",
+                )
+            )
+            continue
 
-        if _is_missing(row_data.get("last_updated")):
-            row_data["last_updated"] = date.today()
+        external_unit_id = _normalize_external_unit_id(row_data["external_unit_id"])
+        row_data["external_unit_id"] = external_unit_id
+        unit_data = {
+            field: row_data.get(field)
+            for field in UNIT_LEVEL_FIELDS
+            if field in row_data
+        }
+        group = grouped_units.setdefault(
+            external_unit_id,
+            {
+                "unit_data": unit_data,
+                "payment_plans": [],
+                "plan_keys": set(),
+                "row_numbers": [],
+                "has_error": False,
+            },
+        )
+        group["row_numbers"].append(row_number)
+
+        if group["unit_data"] is not unit_data:
+            conflict_message = _merge_unit_level_values(
+                group["unit_data"],
+                unit_data,
+            )
+            if conflict_message:
+                group["has_error"] = True
+                errors.append(_validation_error(row_number, conflict_message))
+                continue
+
+        if _row_has_payment_plan(row_data):
+            try:
+                payment_plan = _build_payment_plan(row_data)
+            except (ValueError, ValidationError) as exc:
+                group["has_error"] = True
+                errors.append(_validation_error(row_number, str(exc)))
+                continue
+
+            if payment_plan.plan_key in group["plan_keys"]:
+                group["has_error"] = True
+                errors.append(
+                    _validation_error(
+                        row_number,
+                        "Duplicate payment plan key found for unit "
+                        f"{external_unit_id}: {payment_plan.plan_key}",
+                    )
+                )
+                continue
+
+            group["plan_keys"].add(payment_plan.plan_key)
+            group["payment_plans"].append(payment_plan)
+
+    valid_units: list[UnitSchema] = []
+    for external_unit_id in sorted(grouped_units):
+        group = grouped_units[external_unit_id]
+        if group["has_error"]:
+            continue
+
+        unit_data = group["unit_data"].copy()
+        if _is_missing(unit_data.get("source")):
+            unit_data["source"] = source_name
+        if _is_missing(unit_data.get("last_updated")):
+            unit_data["last_updated"] = date.today()
+        unit_data["payment_plans"] = group["payment_plans"]
 
         try:
-            valid_units.append(UnitSchema(**row_data))
+            valid_units.append(UnitSchema(**unit_data))
         except ValidationError as exc:
             errors.append(
                 {
-                    "row_number": row_number,
+                    "row_number": group["row_numbers"][0],
                     "errors": exc.errors(),
                     "message": str(exc),
                 }
@@ -290,6 +468,92 @@ def _clean_missing_values(row_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_payment_plan(row_data: dict[str, Any]) -> PaymentPlanSchema:
+    payment_plan_data = {
+        field: row_data.get(field)
+        for field in PAYMENT_PLAN_FIELDS
+        if not _is_missing(row_data.get(field))
+    }
+    payment_plan_data["plan_key"] = generate_plan_key(
+        source_plan_id=payment_plan_data.get("source_plan_id"),
+        plan_name=payment_plan_data.get("plan_name"),
+        payment_method=payment_plan_data.get("payment_method"),
+        installment_years=payment_plan_data.get("installment_years"),
+    )
+    return PaymentPlanSchema(**payment_plan_data)
+
+
+def _row_has_payment_plan(row_data: dict[str, Any]) -> bool:
+    identity_or_value_fields = (
+        "source_plan_id",
+        "plan_name",
+        "payment_method",
+        "down_payment",
+        "installment_years",
+        "total_price",
+        "currency",
+    )
+    return any(not _is_missing(row_data.get(field)) for field in identity_or_value_fields)
+
+
+def _merge_unit_level_values(
+    existing_unit_data: dict[str, Any],
+    new_unit_data: dict[str, Any],
+) -> str | None:
+    for field in UNIT_LEVEL_FIELDS:
+        existing_value = existing_unit_data.get(field)
+        new_value = new_unit_data.get(field)
+
+        if _is_missing(existing_value) and not _is_missing(new_value):
+            existing_unit_data[field] = new_value
+            continue
+        if not _is_missing(existing_value) and _is_missing(new_value):
+            continue
+
+        if not _values_match(existing_value, new_value):
+            return (
+                "Conflicting repeated unit-level value for "
+                f"{new_unit_data.get('external_unit_id')} field {field}: "
+                f"{existing_value!r} != {new_value!r}"
+            )
+    return None
+
+
+def _normalize_external_unit_id(value: Any) -> str:
+    if _is_integer(value):
+        return str(int(value))
+    return str(value).strip()
+
+
+def _values_match(left: Any, right: Any) -> bool:
+    if _is_missing(left) and _is_missing(right):
+        return True
+    return left == right
+
+
+def _validation_error(row_number: int, message: str) -> dict[str, Any]:
+    return {
+        "row_number": row_number,
+        "errors": [],
+        "message": message,
+    }
+
+
+def _normalize_key_component(value: Any) -> str:
+    normalized_value = str(value).strip().lower()
+    normalized_value = re.sub(r"\s+", "_", normalized_value)
+    if not normalized_value:
+        raise ValueError("Payment plan key component must not be empty")
+    return normalized_value
+
+
+def _format_number_for_key(value: Any) -> str:
+    number_value = float(value)
+    if number_value.is_integer():
+        return str(int(number_value))
+    return str(number_value)
+
+
 def _is_missing(value: Any) -> bool:
     if value is None:
         return True
@@ -299,14 +563,14 @@ def _is_missing(value: Any) -> bool:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
+    return isinstance(value, Real) and not isinstance(value, bool)
 
 
 def _is_integer(value: Any) -> bool:
     if isinstance(value, bool):
         return False
-    if isinstance(value, int):
+    if isinstance(value, Integral):
         return True
-    if isinstance(value, float):
+    if isinstance(value, Real):
         return value.is_integer()
     return False

@@ -1,12 +1,19 @@
+from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.ai_engine.schemas import UnitSchema
+from app.ai_engine.schemas import InventorySnapshot, PaymentPlanSchema, UnitSchema
 
 
 class InventoryChangeType(str, Enum):
+    ADDED = "added"
+    UPDATED = "updated"
+    MISSING = "missing"
+
+
+class PaymentPlanChangeType(str, Enum):
     ADDED = "added"
     UPDATED = "updated"
     MISSING = "missing"
@@ -17,45 +24,67 @@ class FieldChange(BaseModel):
     new: Any
 
 
+class PaymentPlanChange(BaseModel):
+    plan_key: str
+    change_type: PaymentPlanChangeType
+    changes: dict[str, FieldChange] = Field(default_factory=dict)
+
+
 class InventoryChange(BaseModel):
-    unit_id: str
+    external_unit_id: str
     change_type: InventoryChangeType
     changes: dict[str, FieldChange] = Field(default_factory=dict)
+    payment_plan_changes: list[PaymentPlanChange] = Field(default_factory=list)
 
 
 TRACKED_FIELDS: tuple[str, ...] = (
     "compound_name",
     "location",
     "property_type",
-    "price",
+    "base_price",
+    "base_currency",
     "status",
     "bedrooms",
     "bathrooms",
     "area_sqm",
+    "delivery_date",
+)
+
+PAYMENT_PLAN_TRACKED_FIELDS: tuple[str, ...] = (
+    "source_plan_id",
+    "plan_name",
+    "payment_method",
     "down_payment",
     "installment_years",
-    "delivery_date",
+    "total_price",
+    "currency",
 )
 
 
 def detect_inventory_changes(
-    previous_units: list[UnitSchema],
-    current_units: list[UnitSchema],
+    previous_snapshot: InventorySnapshot,
+    current_snapshot: InventorySnapshot,
 ) -> list[InventoryChange]:
-    previous_by_id = _index_units_by_id(previous_units, snapshot_name="previous")
-    current_by_id = _index_units_by_id(current_units, snapshot_name="current")
+    if previous_snapshot.scope_key != current_snapshot.scope_key:
+        raise ValueError(
+            "Cannot compare inventory snapshots with different scope_key values: "
+            f"{previous_snapshot.scope_key!r} != {current_snapshot.scope_key!r}"
+        )
+
+    previous_by_id = _index_units_by_id(previous_snapshot.units, "previous")
+    current_by_id = _index_units_by_id(current_snapshot.units, "current")
 
     changes: list[InventoryChange] = []
     all_unit_ids = sorted(set(previous_by_id) | set(current_by_id))
 
-    for unit_id in all_unit_ids:
-        previous_unit = previous_by_id.get(unit_id)
-        current_unit = current_by_id.get(unit_id)
+    for external_unit_id in all_unit_ids:
+        previous_unit = previous_by_id.get(external_unit_id)
+        current_unit = current_by_id.get(external_unit_id)
 
         if previous_unit is None and current_unit is not None:
             changes.append(
                 InventoryChange(
-                    unit_id=unit_id,
+                    external_unit_id=external_unit_id,
                     change_type=InventoryChangeType.ADDED,
                 )
             )
@@ -64,7 +93,7 @@ def detect_inventory_changes(
         if current_unit is None and previous_unit is not None:
             changes.append(
                 InventoryChange(
-                    unit_id=unit_id,
+                    external_unit_id=external_unit_id,
                     change_type=InventoryChangeType.MISSING,
                 )
             )
@@ -73,13 +102,23 @@ def detect_inventory_changes(
         if previous_unit is None or current_unit is None:
             continue
 
-        field_changes = _detect_field_changes(previous_unit, current_unit)
-        if field_changes:
+        field_changes = _detect_field_changes(
+            previous_unit,
+            current_unit,
+            TRACKED_FIELDS,
+        )
+        payment_plan_changes = _detect_payment_plan_changes(
+            previous_unit.payment_plans,
+            current_unit.payment_plans,
+        )
+
+        if field_changes or payment_plan_changes:
             changes.append(
                 InventoryChange(
-                    unit_id=unit_id,
+                    external_unit_id=external_unit_id,
                     change_type=InventoryChangeType.UPDATED,
                     changes=field_changes,
+                    payment_plan_changes=payment_plan_changes,
                 )
             )
 
@@ -94,29 +133,104 @@ def _index_units_by_id(
     duplicate_unit_ids: set[str] = set()
 
     for unit in units:
-        if unit.unit_id in units_by_id:
-            duplicate_unit_ids.add(unit.unit_id)
-        units_by_id[unit.unit_id] = unit
+        if unit.external_unit_id in units_by_id:
+            duplicate_unit_ids.add(unit.external_unit_id)
+        units_by_id[unit.external_unit_id] = unit
 
     if duplicate_unit_ids:
         duplicate_list = ", ".join(sorted(duplicate_unit_ids))
         raise ValueError(
-            f"Duplicate unit_id values found in {snapshot_name} snapshot: "
-            f"{duplicate_list}"
+            "Duplicate external_unit_id values found in "
+            f"{snapshot_name} snapshot: {duplicate_list}"
         )
 
     return units_by_id
 
 
+def _detect_payment_plan_changes(
+    previous_plans: list[PaymentPlanSchema],
+    current_plans: list[PaymentPlanSchema],
+) -> list[PaymentPlanChange]:
+    previous_by_key = _index_payment_plans_by_key(previous_plans, "previous")
+    current_by_key = _index_payment_plans_by_key(current_plans, "current")
+
+    changes: list[PaymentPlanChange] = []
+    all_plan_keys = sorted(set(previous_by_key) | set(current_by_key))
+
+    for plan_key in all_plan_keys:
+        previous_plan = previous_by_key.get(plan_key)
+        current_plan = current_by_key.get(plan_key)
+
+        if previous_plan is None and current_plan is not None:
+            changes.append(
+                PaymentPlanChange(
+                    plan_key=plan_key,
+                    change_type=PaymentPlanChangeType.ADDED,
+                )
+            )
+            continue
+
+        if current_plan is None and previous_plan is not None:
+            changes.append(
+                PaymentPlanChange(
+                    plan_key=plan_key,
+                    change_type=PaymentPlanChangeType.MISSING,
+                )
+            )
+            continue
+
+        if previous_plan is None or current_plan is None:
+            continue
+
+        field_changes = _detect_field_changes(
+            previous_plan,
+            current_plan,
+            PAYMENT_PLAN_TRACKED_FIELDS,
+        )
+        if field_changes:
+            changes.append(
+                PaymentPlanChange(
+                    plan_key=plan_key,
+                    change_type=PaymentPlanChangeType.UPDATED,
+                    changes=field_changes,
+                )
+            )
+
+    return changes
+
+
+def _index_payment_plans_by_key(
+    plans: list[PaymentPlanSchema],
+    snapshot_name: str,
+) -> dict[str, PaymentPlanSchema]:
+    plans_by_key: dict[str, PaymentPlanSchema] = {}
+    duplicate_plan_keys: set[str] = set()
+
+    for plan in plans:
+        if plan.plan_key in plans_by_key:
+            duplicate_plan_keys.add(plan.plan_key)
+        plans_by_key[plan.plan_key] = plan
+
+    if duplicate_plan_keys:
+        duplicate_list = ", ".join(sorted(duplicate_plan_keys))
+        raise ValueError(
+            "Duplicate payment plan keys found in "
+            f"{snapshot_name} snapshot: {duplicate_list}"
+        )
+
+    return plans_by_key
+
+
 def _detect_field_changes(
-    previous_unit: UnitSchema,
-    current_unit: UnitSchema,
+    previous_model: BaseModel,
+    current_model: BaseModel,
+    tracked_fields: tuple[str, ...],
 ) -> dict[str, FieldChange]:
     changes: dict[str, FieldChange] = {}
 
-    for field_name in TRACKED_FIELDS:
-        old_value = getattr(previous_unit, field_name)
-        new_value = getattr(current_unit, field_name)
+    for field_name in tracked_fields:
+        old_value = getattr(previous_model, field_name)
+        new_value = getattr(current_model, field_name)
 
         if old_value != new_value:
             changes[field_name] = FieldChange(
@@ -130,4 +244,6 @@ def _detect_field_changes(
 def _readable_value(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, date | datetime):
+        return value.isoformat()
     return value
