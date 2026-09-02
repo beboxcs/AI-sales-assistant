@@ -28,11 +28,9 @@ jobs:
 
       - name: Run tests
         shell: bash
-        env:
-          PYTHONPATH: .
         run: |
           set +e
-          pytest
+          python -m pytest
           code=$?
           set -e
 
