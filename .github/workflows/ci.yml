@@ -39,6 +39,9 @@ jobs:
           docker compose logs db
           exit 1
 
+      - name: Run database migrations
+        run: docker compose run --rm web alembic upgrade head
+
       - name: Run tests inside Docker
         shell: bash
         run: |
