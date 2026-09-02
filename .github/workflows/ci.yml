@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          pytest
+          python -m pytest
           code=$?
           set -e
 
@@ -55,6 +55,23 @@ jobs:
       - name: Show running containers
         run: docker compose ps
 
+      - name: Wait for PostgreSQL
+        shell: bash
+        run: |
+          for i in {1..30}; do
+            if docker compose exec -T db pg_isready -U postgres; then
+              echo "PostgreSQL is ready."
+              exit 0
+            fi
+
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+
+          echo "PostgreSQL did not become ready in time."
+          docker compose logs db
+          exit 1
+
       - name: Wait for FastAPI
         shell: bash
         run: |
@@ -71,9 +88,6 @@ jobs:
           echo "FastAPI did not start in time."
           docker compose logs
           exit 1
-
-      - name: Check PostgreSQL
-        run: docker compose exec -T db pg_isready -U postgres
 
       - name: Show logs on failure
         if: failure()
