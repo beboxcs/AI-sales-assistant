@@ -1,0 +1,98 @@
+from enum import Enum
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.ai_engine.search_filters import SearchFilters
+
+
+class SearchField(str, Enum):
+    LOCATION = "location"
+    PROPERTY_TYPE = "property_type"
+    BEDROOMS = "bedrooms"
+    BATHROOMS = "bathrooms"
+    MIN_PRICE = "min_price"
+    MAX_PRICE = "max_price"
+    MIN_AREA_SQM = "min_area_sqm"
+    MAX_AREA_SQM = "max_area_sqm"
+    PAYMENT_METHOD = "payment_method"
+    MAX_DOWN_PAYMENT = "max_down_payment"
+    MIN_INSTALLMENT_YEARS = "min_installment_years"
+
+
+class ConstraintStrength(str, Enum):
+    HARD = "hard"
+    SOFT = "soft"
+
+
+class MatchMode(str, Enum):
+    EXACT = "exact"
+    NEAR = "near"
+    ALTERNATIVE = "alternative"
+
+
+class SearchConstraint(BaseModel):
+    field: SearchField
+    strength: ConstraintStrength
+
+
+class RankingPreference(BaseModel):
+    field: SearchField
+    weight: float = Field(gt=0)
+
+
+class SearchStrategy(BaseModel):
+    filters: SearchFilters
+    constraints: list[SearchConstraint] = Field(default_factory=list)
+    match_mode: MatchMode = MatchMode.EXACT
+    ranking_preferences: list[RankingPreference] = Field(default_factory=list)
+    requested_scope_keys: list[str] | None = None
+
+    @field_validator("requested_scope_keys")
+    @classmethod
+    def normalize_scope_keys(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("requested_scope_keys must contain at least one key")
+
+        normalized = []
+        for scope_key in value:
+            normalized_key = scope_key.strip()
+            if not normalized_key:
+                raise ValueError("requested_scope_keys must not contain empty keys")
+            normalized.append(normalized_key)
+
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("requested_scope_keys must not contain duplicates")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "SearchStrategy":
+        populated_fields = {
+            field.value
+            for field in SearchField
+            if getattr(self.filters, field.value) is not None
+        }
+
+        constraint_fields = [constraint.field for constraint in self.constraints]
+        if len(constraint_fields) != len(set(constraint_fields)):
+            raise ValueError("constraint fields must be unique")
+        for constraint in self.constraints:
+            if constraint.field.value not in populated_fields:
+                raise ValueError(
+                    "constraint field must reference a populated filter: "
+                    f"{constraint.field.value}"
+                )
+
+        ranking_fields = [preference.field for preference in self.ranking_preferences]
+        if len(ranking_fields) != len(set(ranking_fields)):
+            raise ValueError("ranking preference fields must be unique")
+        for preference in self.ranking_preferences:
+            if preference.field.value not in populated_fields:
+                raise ValueError(
+                    "ranking preference field must reference a populated filter: "
+                    f"{preference.field.value}"
+                )
+        return self
