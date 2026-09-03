@@ -30,6 +30,12 @@ class MatchMode(str, Enum):
     ALTERNATIVE = "alternative"
 
 
+class RelaxationDirection(str, Enum):
+    INCREASE = "increase"
+    DECREASE = "decrease"
+    BOTH = "both"
+
+
 class SearchConstraint(BaseModel):
     field: SearchField
     strength: ConstraintStrength
@@ -37,7 +43,55 @@ class SearchConstraint(BaseModel):
 
 class RankingPreference(BaseModel):
     field: SearchField
-    weight: float = Field(gt=0)
+    weight: float = Field(gt=0, allow_inf_nan=False)
+
+
+class RelaxationRule(BaseModel):
+    field: SearchField
+    max_delta: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_percentage: float | None = Field(
+        default=None, gt=0, le=100, allow_inf_nan=False
+    )
+    direction: RelaxationDirection
+    priority: int = Field(default=1, gt=0)
+
+    @model_validator(mode="after")
+    def require_relaxation_limit(self) -> "RelaxationRule":
+        if self.max_delta is None and self.max_percentage is None:
+            raise ValueError(
+                "RelaxationRule requires max_delta or max_percentage"
+            )
+        return self
+
+
+NUMERIC_RELAXABLE_FIELDS: frozenset[SearchField] = frozenset(
+    {
+        SearchField.BEDROOMS,
+        SearchField.BATHROOMS,
+        SearchField.MIN_PRICE,
+        SearchField.MAX_PRICE,
+        SearchField.MIN_AREA_SQM,
+        SearchField.MAX_AREA_SQM,
+        SearchField.MAX_DOWN_PAYMENT,
+        SearchField.MIN_INSTALLMENT_YEARS,
+    }
+)
+
+DELTA_RELAXABLE_FIELDS: frozenset[SearchField] = NUMERIC_RELAXABLE_FIELDS
+
+PERCENTAGE_RELAXABLE_FIELDS: frozenset[SearchField] = frozenset(
+    {
+        SearchField.MIN_PRICE,
+        SearchField.MAX_PRICE,
+        SearchField.MIN_AREA_SQM,
+        SearchField.MAX_AREA_SQM,
+        SearchField.MAX_DOWN_PAYMENT,
+    }
+)
+
+DISCRETE_DELTA_FIELDS: frozenset[SearchField] = frozenset(
+    {SearchField.BEDROOMS, SearchField.BATHROOMS}
+)
 
 
 class SearchStrategy(BaseModel):
@@ -45,6 +99,7 @@ class SearchStrategy(BaseModel):
     constraints: list[SearchConstraint] = Field(default_factory=list)
     match_mode: MatchMode = MatchMode.EXACT
     ranking_preferences: list[RankingPreference] = Field(default_factory=list)
+    relaxation_rules: list[RelaxationRule] = Field(default_factory=list)
     requested_scope_keys: list[str] | None = None
 
     @field_validator("requested_scope_keys")
@@ -94,5 +149,60 @@ class SearchStrategy(BaseModel):
                 raise ValueError(
                     "ranking preference field must reference a populated filter: "
                     f"{preference.field.value}"
+                )
+
+        constraint_strengths = {
+            constraint.field: constraint.strength for constraint in self.constraints
+        }
+        relaxation_fields = [rule.field for rule in self.relaxation_rules]
+        if len(relaxation_fields) != len(set(relaxation_fields)):
+            raise ValueError("relaxation rule fields must be unique")
+
+        for rule in self.relaxation_rules:
+            if rule.field not in NUMERIC_RELAXABLE_FIELDS:
+                raise ValueError(
+                    "relaxation rules only support numeric fields: "
+                    f"{rule.field.value}"
+                )
+            if rule.field.value not in populated_fields:
+                raise ValueError(
+                    "relaxation rule field must reference a populated filter: "
+                    f"{rule.field.value}"
+                )
+            if (
+                rule.max_delta is not None
+                and rule.field not in DELTA_RELAXABLE_FIELDS
+            ):
+                raise ValueError(
+                    "delta relaxation is not supported for field: "
+                    f"{rule.field.value}"
+                )
+            if (
+                rule.max_percentage is not None
+                and rule.field not in PERCENTAGE_RELAXABLE_FIELDS
+            ):
+                raise ValueError(
+                    "percentage relaxation is not supported for field: "
+                    f"{rule.field.value}"
+                )
+            if (
+                rule.max_delta is not None
+                and rule.field in DISCRETE_DELTA_FIELDS
+                and not rule.max_delta.is_integer()
+            ):
+                raise ValueError(
+                    "max_delta must be a positive whole number for field: "
+                    f"{rule.field.value}"
+                )
+            strength = constraint_strengths.get(rule.field)
+            if strength is None:
+                raise ValueError(
+                    "relaxation rule field must reference a classified constraint: "
+                    f"{rule.field.value}"
+                )
+            if strength is not ConstraintStrength.SOFT:
+                raise ValueError(
+                    "relaxation rules are only allowed for soft constraints: "
+                    f"{rule.field.value}"
                 )
         return self
