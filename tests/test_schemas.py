@@ -4,13 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.ai_engine.schemas import (
-    Currency,
     InventorySnapshot,
-    PaymentMethod,
     PaymentPlanSchema,
     UnitSchema,
-    UnitStatus,
 )
+from app.domain.enums import Currency, PaymentMethod, UnitStatus
 
 
 def test_unit_schema_uses_external_unit_id_and_excludes_old_unit_id():
@@ -34,6 +32,13 @@ def test_unit_schema_defaults_to_egp_currency():
 
     assert unit.base_currency == Currency.EGP
     assert plan.currency == Currency.EGP
+
+
+def test_ai_schemas_use_shared_domain_enums():
+    assert PaymentPlanSchema.model_fields["payment_method"].annotation is PaymentMethod
+    assert PaymentPlanSchema.model_fields["currency"].annotation is Currency
+    assert UnitSchema.model_fields["base_currency"].annotation is Currency
+    assert UnitSchema.model_fields["status"].annotation is UnitStatus
 
 
 def test_unit_schema_allows_multiple_payment_plans():

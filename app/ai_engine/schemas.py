@@ -1,23 +1,8 @@
 from datetime import date
-from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
-class UnitStatus(str, Enum):
-    AVAILABLE = "Available"
-    HOLD = "Hold"
-    RESERVED = "Reserved"
-    SOLD = "Sold"
-
-
-class PaymentMethod(str, Enum):
-    CASH = "Cash"
-    INSTALLMENT = "Installment"
-
-
-class Currency(str, Enum):
-    EGP = "EGP"
+from app.domain.enums import Currency, PaymentMethod, UnitStatus
 
 
 class PaymentPlanSchema(BaseModel):
