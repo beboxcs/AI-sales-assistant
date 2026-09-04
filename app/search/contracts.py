@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
+from app.domain.enums import Currency, PaymentMethod, UnitStatus
+
 
 @dataclass(frozen=True)
 class SearchExecutionContext:
@@ -23,11 +25,11 @@ class PaymentPlanCandidate:
     plan_key: str
     source_plan_id: str | None
     plan_name: str | None
-    payment_method: str
+    payment_method: PaymentMethod
     down_payment: Decimal | None
     installment_years: Decimal | None
-    total_price: Decimal
-    currency: str
+    total_price: Decimal | None
+    currency: Currency
 
 
 @dataclass(frozen=True)
@@ -42,8 +44,8 @@ class UnitCandidate:
     bathrooms: int | None
     area_sqm: Decimal | None
     base_price: Decimal | None
-    base_currency: str
-    status: str
+    base_currency: Currency
+    status: UnitStatus
     delivery_date: date | None
     source_last_updated: datetime | None
     matched_scope_keys: tuple[str, ...]
