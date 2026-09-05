@@ -1,8 +1,9 @@
 from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.ai_engine.schemas import InventorySnapshot, PaymentPlanSchema, UnitSchema
 
@@ -31,10 +32,19 @@ class PaymentPlanChange(BaseModel):
 
 
 class InventoryChange(BaseModel):
+    compound_key: str
     external_unit_id: str
     change_type: InventoryChangeType
     changes: dict[str, FieldChange] = Field(default_factory=dict)
     payment_plan_changes: list[PaymentPlanChange] = Field(default_factory=list)
+
+    @field_validator("compound_key")
+    @classmethod
+    def compound_key_must_not_be_empty(cls, value: str) -> str:
+        stripped_value = value.strip()
+        if not stripped_value:
+            raise ValueError("compound_key must not be empty")
+        return stripped_value
 
 
 TRACKED_FIELDS: tuple[str, ...] = (
@@ -71,19 +81,21 @@ def detect_inventory_changes(
             f"{previous_snapshot.scope_key!r} != {current_snapshot.scope_key!r}"
         )
 
-    previous_by_id = _index_units_by_id(previous_snapshot.units, "previous")
-    current_by_id = _index_units_by_id(current_snapshot.units, "current")
+    previous_by_id = _index_units_by_identity(previous_snapshot.units, "previous")
+    current_by_id = _index_units_by_identity(current_snapshot.units, "current")
 
     changes: list[InventoryChange] = []
-    all_unit_ids = sorted(set(previous_by_id) | set(current_by_id))
+    all_unit_identities = sorted(set(previous_by_id) | set(current_by_id))
 
-    for external_unit_id in all_unit_ids:
-        previous_unit = previous_by_id.get(external_unit_id)
-        current_unit = current_by_id.get(external_unit_id)
+    for compound_key, external_unit_id in all_unit_identities:
+        unit_identity = (compound_key, external_unit_id)
+        previous_unit = previous_by_id.get(unit_identity)
+        current_unit = current_by_id.get(unit_identity)
 
         if previous_unit is None and current_unit is not None:
             changes.append(
                 InventoryChange(
+                    compound_key=compound_key,
                     external_unit_id=external_unit_id,
                     change_type=InventoryChangeType.ADDED,
                 )
@@ -93,6 +105,7 @@ def detect_inventory_changes(
         if current_unit is None and previous_unit is not None:
             changes.append(
                 InventoryChange(
+                    compound_key=compound_key,
                     external_unit_id=external_unit_id,
                     change_type=InventoryChangeType.MISSING,
                 )
@@ -115,6 +128,7 @@ def detect_inventory_changes(
         if field_changes or payment_plan_changes:
             changes.append(
                 InventoryChange(
+                    compound_key=compound_key,
                     external_unit_id=external_unit_id,
                     change_type=InventoryChangeType.UPDATED,
                     changes=field_changes,
@@ -125,26 +139,30 @@ def detect_inventory_changes(
     return changes
 
 
-def _index_units_by_id(
+def _index_units_by_identity(
     units: list[UnitSchema],
     snapshot_name: str,
-) -> dict[str, UnitSchema]:
-    units_by_id: dict[str, UnitSchema] = {}
-    duplicate_unit_ids: set[str] = set()
+) -> dict[tuple[str, str], UnitSchema]:
+    units_by_identity: dict[tuple[str, str], UnitSchema] = {}
+    duplicate_identities: set[tuple[str, str]] = set()
 
     for unit in units:
-        if unit.external_unit_id in units_by_id:
-            duplicate_unit_ids.add(unit.external_unit_id)
-        units_by_id[unit.external_unit_id] = unit
+        identity = (unit.compound_key, unit.external_unit_id)
+        if identity in units_by_identity:
+            duplicate_identities.add(identity)
+        units_by_identity[identity] = unit
 
-    if duplicate_unit_ids:
-        duplicate_list = ", ".join(sorted(duplicate_unit_ids))
+    if duplicate_identities:
+        duplicate_list = ", ".join(
+            f"({compound_key}, {external_unit_id})"
+            for compound_key, external_unit_id in sorted(duplicate_identities)
+        )
         raise ValueError(
-            "Duplicate external_unit_id values found in "
+            "Duplicate (compound_key, external_unit_id) values found in "
             f"{snapshot_name} snapshot: {duplicate_list}"
         )
 
-    return units_by_id
+    return units_by_identity
 
 
 def _detect_payment_plan_changes(
@@ -246,4 +264,6 @@ def _readable_value(value: Any) -> Any:
         return value.value
     if isinstance(value, date | datetime):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
     return value

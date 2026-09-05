@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -10,9 +11,9 @@ class PaymentPlanSchema(BaseModel):
     source_plan_id: str | None = None
     plan_name: str | None = None
     payment_method: PaymentMethod
-    down_payment: float | None = Field(default=None, ge=0)
-    installment_years: float | None = Field(default=None, gt=0)
-    total_price: float | None = Field(default=None, gt=0)
+    down_payment: Decimal | None = Field(default=None, ge=0)
+    installment_years: Decimal | None = Field(default=None, gt=0)
+    total_price: Decimal | None = Field(default=None, gt=0)
     currency: Currency = Currency.EGP
 
     @field_validator("plan_key")
@@ -37,16 +38,17 @@ class UnitSchema(BaseModel):
     """Schema for a real-estate inventory unit."""
 
     external_unit_id: str
+    compound_key: str
     compound_name: str
     location: str
     property_type: str
-    base_price: float | None = Field(default=None, gt=0)
+    base_price: Decimal | None = Field(default=None, gt=0)
     base_currency: Currency = Currency.EGP
     status: UnitStatus
 
     bedrooms: int | None = Field(default=None, ge=0)
     bathrooms: int | None = Field(default=None, ge=0)
-    area_sqm: float | None = Field(default=None, gt=0)
+    area_sqm: Decimal | None = Field(default=None, gt=0)
     delivery_date: date | None = None
     payment_plans: list[PaymentPlanSchema] = Field(default_factory=list)
 
@@ -59,6 +61,14 @@ class UnitSchema(BaseModel):
         stripped_value = value.strip()
         if not stripped_value:
             raise ValueError("external_unit_id must not be empty")
+        return stripped_value
+
+    @field_validator("compound_key")
+    @classmethod
+    def compound_key_must_not_be_empty(cls, value: str) -> str:
+        stripped_value = value.strip()
+        if not stripped_value:
+            raise ValueError("compound_key must not be empty")
         return stripped_value
 
     @model_validator(mode="after")
@@ -90,16 +100,23 @@ class InventorySnapshot(BaseModel):
         return stripped_value
 
     @model_validator(mode="after")
-    def external_unit_ids_must_be_unique(self) -> "InventorySnapshot":
-        unit_ids = [unit.external_unit_id for unit in self.units]
-        duplicate_ids = sorted(
-            unit_id
-            for unit_id in set(unit_ids)
-            if unit_ids.count(unit_id) > 1
+    def compound_unit_id_pairs_must_be_unique(self) -> "InventorySnapshot":
+        unit_id_pairs = [
+            (unit.compound_key, unit.external_unit_id)
+            for unit in self.units
+        ]
+        duplicate_pairs = sorted(
+            pair
+            for pair in set(unit_id_pairs)
+            if unit_id_pairs.count(pair) > 1
         )
-        if duplicate_ids:
+        if duplicate_pairs:
+            duplicate_values = ", ".join(
+                f"({compound_key}, {external_unit_id})"
+                for compound_key, external_unit_id in duplicate_pairs
+            )
             raise ValueError(
-                "Duplicate external_unit_id values found in snapshot "
-                f"{self.scope_key}: {', '.join(duplicate_ids)}"
+                "Duplicate (compound_key, external_unit_id) values found in "
+                f"snapshot {self.scope_key}: {duplicate_values}"
             )
         return self
