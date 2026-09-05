@@ -1,5 +1,5 @@
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -50,7 +50,7 @@ def _unit_candidate(
         base_currency=Currency.EGP,
         status=UnitStatus.AVAILABLE,
         delivery_date=date(2028, 6, 1),
-        source_last_updated=datetime(2026, 9, 4, 8, 30),
+        source_last_updated=date(2026, 9, 4),
         matched_scope_keys=("compound:10",),
         payment_plans=payment_plans,
     )
@@ -93,6 +93,13 @@ def test_payment_plan_candidate_allows_missing_total_price():
     payment_plan = _payment_plan_candidate(total_price=None)
 
     assert payment_plan.total_price is None
+
+
+def test_unit_candidate_uses_date_for_source_last_updated():
+    unit = _unit_candidate()
+
+    assert unit.source_last_updated == date(2026, 9, 4)
+    assert UnitCandidate.__annotations__["source_last_updated"] == date | None
 
 
 def test_candidates_use_shared_domain_enums_with_preserved_values():

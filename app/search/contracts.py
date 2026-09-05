@@ -1,7 +1,7 @@
 """Shared data contracts for backend search execution."""
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
@@ -47,7 +47,7 @@ class UnitCandidate:
     base_currency: Currency
     status: UnitStatus
     delivery_date: date | None
-    source_last_updated: datetime | None
+    source_last_updated: date | None
     matched_scope_keys: tuple[str, ...]
     payment_plans: tuple[PaymentPlanCandidate, ...]
 
