@@ -200,6 +200,159 @@ def test_unit_level_filters(
     ]
 
 
+def test_plan_price_excludes_unit_inside_base_price_budget(
+    db_session: Session,
+    monkeypatch,
+):
+    company, scope, unit = _seed_present_unit(db_session)
+    plan = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:outside-budget",
+        total_price=Decimal("7000000.00"),
+    )
+    _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(
+            payment_method="Installment",
+            max_price=6_000_000,
+        ),
+    )
+
+    assert unit.base_price == Decimal("5000000.00")
+    assert results == []
+
+
+def test_plan_price_includes_unit_outside_base_price_budget(
+    db_session: Session,
+    monkeypatch,
+):
+    company = _add_company(db_session)
+    compound = _add_compound(db_session, company, "compound:one")
+    scope = _add_scope(db_session, company, "scope:one")
+    unit = _add_unit(
+        db_session,
+        company,
+        compound,
+        "A101",
+        base_price=Decimal("8000000.00"),
+    )
+    plan = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:inside-budget",
+        total_price=Decimal("5500000.00"),
+    )
+    _add_unit_state(db_session, company, unit, scope)
+    _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(
+            payment_method="Installment",
+            max_price=6_000_000,
+        ),
+    )
+
+    assert [candidate.external_unit_id for candidate in results] == ["A101"]
+    assert [item.plan_key for item in results[0].payment_plans] == [
+        "plan:inside-budget"
+    ]
+
+
+def test_plan_filters_and_price_bounds_match_the_same_plan(
+    db_session: Session,
+    monkeypatch,
+):
+    company, scope, unit = _seed_present_unit(db_session)
+    qualifying = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:qualifying",
+        down_payment=Decimal("400000.00"),
+        installment_years=Decimal("7.00"),
+        total_price=Decimal("6000000.00"),
+    )
+    wrong_down_payment = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:wrong-down-payment",
+        down_payment=Decimal("800000.00"),
+        installment_years=Decimal("7.00"),
+        total_price=Decimal("6000000.00"),
+    )
+    wrong_price = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:wrong-price",
+        down_payment=Decimal("400000.00"),
+        installment_years=Decimal("7.00"),
+        total_price=Decimal("7000000.00"),
+    )
+    for plan in (qualifying, wrong_down_payment, wrong_price):
+        _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(
+            payment_method="Installment",
+            max_down_payment=500_000,
+            min_installment_years=6,
+            min_price=5_500_000,
+            max_price=6_500_000,
+        ),
+    )
+
+    assert len(results) == 1
+    assert [plan.plan_key for plan in results[0].payment_plans] == [
+        "plan:qualifying"
+    ]
+
+
+def test_null_plan_total_price_fails_active_plan_price_bound(
+    db_session: Session,
+    monkeypatch,
+):
+    company, scope, unit = _seed_present_unit(db_session)
+    plan = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:no-total-price",
+        total_price=None,
+    )
+    _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(
+            payment_method="Installment",
+            max_price=6_000_000,
+        ),
+    )
+
+    assert results == []
+
+
 @pytest.mark.parametrize(
     ("filters", "expected_plan_key"),
     [
@@ -384,6 +537,42 @@ def test_same_external_unit_id_in_different_compounds_remains_distinct(
     }
 
 
+def test_only_available_units_are_searchable_by_default(
+    db_session: Session,
+    monkeypatch,
+):
+    company = _add_company(db_session)
+    compound = _add_compound(db_session, company, "compound:one")
+    scope = _add_scope(db_session, company, "scope:one")
+    available = _add_unit(
+        db_session,
+        company,
+        compound,
+        "AVAILABLE",
+        status=UnitStatus.AVAILABLE.value,
+    )
+    held = _add_unit(
+        db_session,
+        company,
+        compound,
+        "HELD",
+        status=UnitStatus.HOLD.value,
+    )
+    _add_unit_state(db_session, company, available, scope)
+    _add_unit_state(db_session, company, held, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+    )
+
+    assert [candidate.external_unit_id for candidate in results] == [
+        "AVAILABLE"
+    ]
+
+
 def test_unexpected_repository_failure_is_translated(monkeypatch):
     class StubSessionContext:
         def __enter__(self):
@@ -536,6 +725,7 @@ def _add_unit(
     bathrooms: int | None = 2,
     base_price: Decimal | None = Decimal("5000000.00"),
     area_sqm: Decimal | None = Decimal("150.00"),
+    status: str = UnitStatus.AVAILABLE.value,
 ) -> Unit:
     unit = Unit(
         id=unit_id or _test_id(),
@@ -547,7 +737,7 @@ def _add_unit(
         bathrooms=bathrooms,
         base_price=base_price,
         base_currency="EGP",
-        status="Available",
+        status=status,
         area_sqm=area_sqm,
         delivery_date=date(2028, 6, 30),
         source_last_updated=date(2026, 9, 5),
@@ -587,6 +777,7 @@ def _add_plan(
     payment_method: str = "Installment",
     down_payment: Decimal | None = Decimal("500000.00"),
     installment_years: Decimal | None = Decimal("7.00"),
+    total_price: Decimal | None = Decimal("6000000.00"),
 ) -> PaymentPlan:
     plan = PaymentPlan(
         id=plan_id or _test_id(),
@@ -598,7 +789,7 @@ def _add_plan(
         payment_method=payment_method,
         down_payment=down_payment,
         installment_years=installment_years,
-        total_price=Decimal("6000000.00"),
+        total_price=total_price,
         currency="EGP",
     )
     session.add(plan)
