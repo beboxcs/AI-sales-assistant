@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
@@ -18,6 +19,25 @@ def test_unit_schema_uses_external_unit_id_and_excludes_old_unit_id():
 
     assert output["external_unit_id"] == "A101"
     assert "unit_id" not in output
+
+
+def test_unit_schema_requires_and_strips_compound_key():
+    unit = _unit(compound_key="  compound-a  ")
+
+    assert unit.compound_key == "compound-a"
+
+
+def test_unit_schema_rejects_empty_compound_key():
+    with pytest.raises(ValidationError, match="compound_key"):
+        _unit(compound_key=" ")
+
+
+def test_unit_schema_requires_compound_key():
+    data = _unit().model_dump()
+    data.pop("compound_key")
+
+    with pytest.raises(ValidationError, match="compound_key"):
+        UnitSchema(**data)
 
 
 def test_unit_schema_allows_nullable_base_price():
@@ -104,8 +124,52 @@ def test_inventory_snapshot_requires_non_empty_scope_key():
 
 
 def test_inventory_snapshot_rejects_duplicate_external_unit_ids():
-    with pytest.raises(ValidationError, match="Duplicate external_unit_id"):
+    with pytest.raises(ValidationError, match=r"Duplicate \(compound_key, external_unit_id\)"):
         InventorySnapshot(scope_key="developer:demo", units=[_unit(), _unit()])
+
+
+def test_inventory_snapshot_allows_same_external_id_in_different_compounds():
+    snapshot = InventorySnapshot(
+        scope_key="developer:demo",
+        units=[_unit(compound_key="compound-a"), _unit(compound_key="compound-b")],
+    )
+
+    assert len(snapshot.units) == 2
+
+
+def test_decimal_numeric_schema_fields_are_decimal():
+    unit = _unit()
+    plan = _plan()
+
+    assert isinstance(unit.base_price, Decimal)
+    assert isinstance(unit.area_sqm, Decimal)
+    assert isinstance(plan.down_payment, Decimal)
+    assert isinstance(plan.installment_years, Decimal)
+    assert isinstance(plan.total_price, Decimal)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("base_price", Decimal("0")),
+        ("area_sqm", Decimal("0")),
+        ("down_payment", Decimal("-1")),
+        ("installment_years", Decimal("0")),
+        ("total_price", Decimal("0")),
+    ],
+)
+def test_decimal_numeric_bounds_remain_validated(field, value):
+    data = _unit()
+    if field in {"down_payment", "installment_years", "total_price"}:
+        plan_data = _plan().model_dump()
+        plan_data[field] = value
+        with pytest.raises(ValidationError):
+            PaymentPlanSchema(**plan_data)
+    else:
+        data = data.model_dump()
+        data[field] = value
+        with pytest.raises(ValidationError):
+            UnitSchema(**data)
 
 
 def _plan(**overrides) -> PaymentPlanSchema:
@@ -124,6 +188,7 @@ def _plan(**overrides) -> PaymentPlanSchema:
 def _unit(**overrides) -> UnitSchema:
     data = {
         "external_unit_id": "A101",
+        "compound_key": "compound-a",
         "compound_name": "Nile Gardens",
         "location": "New Cairo",
         "property_type": "Apartment",

@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -39,7 +40,7 @@ def test_process_inventory_validates_sample_csv_with_old_safe_headers():
     )
     assert unit_with_missing_source.source == file_path.name
     assert unit_with_missing_source.last_updated == date.today()
-    assert unit_with_missing_source.base_price == 4200000.0
+    assert unit_with_missing_source.base_price == Decimal("4200000")
     assert unit_with_missing_source.payment_plans == []
 
     error_rows = {error["row_number"] for error in errors}
@@ -58,7 +59,7 @@ def test_process_inventory_maps_company_column_aliases():
     assert unit.external_unit_id == "G701"
     assert unit.compound_name == "Cairo Gate"
     assert unit.property_type == "Apartment"
-    assert unit.base_price == 6100000.0
+    assert unit.base_price == Decimal("6100000")
     assert unit.status == UnitStatus.AVAILABLE
     assert unit.bedrooms == 3
     assert unit.payment_plans == []
@@ -106,13 +107,52 @@ def test_map_column_aliases_does_not_map_generic_id_column():
     assert list(mapped_df.columns) == ["id", "external_unit_id"]
 
 
+def test_map_column_aliases_maps_explicit_compound_key_aliases_only():
+    df = normalize_column_names(
+        pd.DataFrame(columns=["Compound Code", "Compound Name"])
+    )
+
+    mapped_df = map_column_aliases(df)
+
+    assert list(mapped_df.columns) == ["compound_key", "compound_name"]
+
+
+def test_validate_inventory_keeps_same_unit_id_separate_by_compound_key():
+    df = pd.DataFrame(
+        [
+            _row(compound_key="compound-a"),
+            _row(compound_key="compound-b"),
+        ]
+    )
+
+    valid_units, errors = validate_inventory(df, source_name="manual.csv")
+
+    assert errors == [], _format_errors(errors)
+    assert {(unit.compound_key, unit.external_unit_id) for unit in valid_units} == {
+        ("compound-a", "A101"),
+        ("compound-b", "A101"),
+    }
+
+
+def test_validate_inventory_requires_canonical_compound_key():
+    valid_units, errors = validate_inventory(
+        pd.DataFrame([_row(compound_key=None)]),
+        source_name="manual.csv",
+    )
+
+    assert valid_units == []
+    assert len(errors) == 1
+    assert "compound_key is required" in errors[0]["message"]
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("EGP 5,500,000", 5500000.0),
-        ("5.5M", 5500000.0),
-        ("5.5 million", 5500000.0),
-        (5500000, 5500000.0),
+        ("EGP 5,500,000", Decimal("5500000")),
+        ("5.5M", Decimal("5500000.0")),
+        ("5.5 million", Decimal("5500000.0")),
+        (5500000, Decimal("5500000")),
+        (5500000.5, Decimal("5500000.5")),
     ],
 )
 def test_normalize_money_parses_deterministic_values(value, expected):
@@ -127,9 +167,9 @@ def test_normalize_money_leaves_ambiguous_values(value):
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("150 sqm", 150.0),
-        ("150 m2", 150.0),
-        ("150 m\u00b2", 150.0),
+        ("150 sqm", Decimal("150")),
+        ("150 m2", Decimal("150")),
+        ("150 m\u00b2", Decimal("150")),
     ],
 )
 def test_normalize_area_parses_square_meter_values(value, expected):
@@ -181,8 +221,8 @@ def test_process_inventory_normalizes_messy_values_and_payment_plan():
     assert unit.external_unit_id == "M901"
     assert unit.compound_name == "River Walk"
     assert unit.property_type == "Twin House"
-    assert unit.base_price == 5500000.0
-    assert unit.area_sqm == 150.0
+    assert unit.base_price == Decimal("5500000.0")
+    assert unit.area_sqm == Decimal("150")
     assert unit.bedrooms == 3
     assert unit.bathrooms == 2
     assert unit.status == UnitStatus.AVAILABLE
@@ -193,8 +233,8 @@ def test_process_inventory_normalizes_messy_values_and_payment_plan():
     plan = unit.payment_plans[0]
     assert plan.plan_key == "name:5_years"
     assert plan.payment_method == PaymentMethod.INSTALLMENT
-    assert plan.down_payment == 550000.0
-    assert plan.total_price == 5800000.0
+    assert plan.down_payment == Decimal("550000")
+    assert plan.total_price == Decimal("5800000")
 
 
 def test_validate_inventory_aggregates_multiple_payment_plan_rows():
@@ -307,7 +347,7 @@ def test_validate_inventory_merges_when_later_plan_row_leaves_unit_values_blank(
     assert errors == [], _format_errors(errors)
     assert len(valid_units) == 1
     assert valid_units[0].compound_name == "Nile Gardens"
-    assert valid_units[0].base_price == 8000000.0
+    assert valid_units[0].base_price == Decimal("8000000.0")
     assert len(valid_units[0].payment_plans) == 2
 
 
@@ -436,6 +476,7 @@ def test_generate_plan_key_raises_when_no_reliable_identity_exists():
 def _row(**overrides):
     data = {
         "external_unit_id": "A101",
+        "compound_key": "compound-a",
         "compound_name": "Nile Gardens",
         "location": "New Cairo",
         "property_type": "Apartment",

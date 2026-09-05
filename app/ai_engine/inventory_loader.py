@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
 from pathlib import Path
 import re
@@ -16,6 +17,9 @@ COLUMN_ALIASES: dict[str, str] = {
     "unit_id": "external_unit_id",
     "unit_number": "external_unit_id",
     "unit_no": "external_unit_id",
+    "compound_code": "compound_key",
+    "project_key": "compound_key",
+    "project_code": "compound_key",
     "compound": "compound_name",
     "project": "compound_name",
     "project_name": "compound_name",
@@ -75,6 +79,7 @@ COLUMN_ALIASES: dict[str, str] = {
 
 UNIT_LEVEL_FIELDS: tuple[str, ...] = (
     "external_unit_id",
+    "compound_key",
     "compound_name",
     "location",
     "property_type",
@@ -182,7 +187,8 @@ def normalize_money(value: Any) -> Any:
     if _is_missing(value):
         return value
     if _is_number(value):
-        return float(value)
+        decimal_value = _safe_decimal(value)
+        return value if decimal_value is None else decimal_value
     if not isinstance(value, str):
         return value
 
@@ -196,8 +202,13 @@ def normalize_money(value: Any) -> Any:
     if not match:
         return value
 
-    amount = float(match.group(1).replace(",", ""))
-    multiplier = 1_000_000 if match.group(2) else 1
+    try:
+        amount = Decimal(match.group(1).replace(",", ""))
+    except InvalidOperation:
+        return value
+    if not amount.is_finite():
+        return value
+    multiplier = Decimal("1000000") if match.group(2) else Decimal("1")
     return amount * multiplier
 
 
@@ -205,7 +216,8 @@ def normalize_area(value: Any) -> Any:
     if _is_missing(value):
         return value
     if _is_number(value):
-        return float(value)
+        decimal_value = _safe_decimal(value)
+        return value if decimal_value is None else decimal_value
     if not isinstance(value, str):
         return value
 
@@ -217,7 +229,11 @@ def normalize_area(value: Any) -> Any:
     if not match:
         return value
 
-    return float(match.group(1))
+    try:
+        area = Decimal(match.group(1))
+    except InvalidOperation:
+        return value
+    return area if area.is_finite() else value
 
 
 def normalize_integer_count(value: Any, labels: list[str]) -> Any:
@@ -274,6 +290,10 @@ def normalize_row_values(row: dict[str, Any]) -> dict[str, Any]:
         normalized_row["down_payment"] = normalize_money(normalized_row["down_payment"])
     if "total_price" in normalized_row:
         normalized_row["total_price"] = normalize_money(normalized_row["total_price"])
+    if "installment_years" in normalized_row:
+        normalized_row["installment_years"] = _normalize_decimal_value(
+            normalized_row["installment_years"]
+        )
     if "currency" in normalized_row:
         normalized_row["currency"] = normalize_currency(normalized_row["currency"])
     if "payment_method" in normalized_row:
@@ -332,7 +352,7 @@ def validate_inventory(
     source_name: str,
 ) -> tuple[list[UnitSchema], list[dict[str, Any]]]:
     errors: list[dict[str, Any]] = []
-    grouped_units: dict[str, dict[str, Any]] = {}
+    grouped_units: dict[tuple[str, str], dict[str, Any]] = {}
 
     for row_number, (_, row) in enumerate(df.iterrows(), start=2):
         row_data = _clean_missing_values(row.to_dict())
@@ -349,13 +369,25 @@ def validate_inventory(
 
         external_unit_id = _normalize_external_unit_id(row_data["external_unit_id"])
         row_data["external_unit_id"] = external_unit_id
+        if _is_missing(row_data.get("compound_key")):
+            errors.append(
+                _validation_error(
+                    row_number,
+                    "compound_key is required for inventory rows",
+                )
+            )
+            continue
+
+        compound_key = str(row_data["compound_key"]).strip()
+        row_data["compound_key"] = compound_key
+        unit_identity = (compound_key, external_unit_id)
         unit_data = {
             field: row_data.get(field)
             for field in UNIT_LEVEL_FIELDS
             if field in row_data
         }
         group = grouped_units.setdefault(
-            external_unit_id,
+            unit_identity,
             {
                 "unit_data": unit_data,
                 "payment_plans": [],
@@ -390,7 +422,8 @@ def validate_inventory(
                     _validation_error(
                         row_number,
                         "Duplicate payment plan key found for unit "
-                        f"{external_unit_id}: {payment_plan.plan_key}",
+                        f"{compound_key}/{external_unit_id}: "
+                        f"{payment_plan.plan_key}",
                     )
                 )
                 continue
@@ -399,8 +432,8 @@ def validate_inventory(
             group["payment_plans"].append(payment_plan)
 
     valid_units: list[UnitSchema] = []
-    for external_unit_id in sorted(grouped_units):
-        group = grouped_units[external_unit_id]
+    for unit_identity in sorted(grouped_units):
+        group = grouped_units[unit_identity]
         if group["has_error"]:
             continue
 
@@ -548,10 +581,12 @@ def _normalize_key_component(value: Any) -> str:
 
 
 def _format_number_for_key(value: Any) -> str:
-    number_value = float(value)
-    if number_value.is_integer():
-        return str(int(number_value))
-    return str(number_value)
+    number_value = _safe_decimal(value)
+    if number_value is None:
+        return str(value)
+    if number_value == number_value.to_integral_value():
+        return str(number_value.quantize(Decimal("1")))
+    return format(number_value.normalize(), "f")
 
 
 def _is_missing(value: Any) -> bool:
@@ -563,7 +598,10 @@ def _is_missing(value: Any) -> bool:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, Real) and not isinstance(value, bool)
+    return (
+        isinstance(value, (Decimal, Real))
+        and not isinstance(value, bool)
+    )
 
 
 def _is_integer(value: Any) -> bool:
@@ -571,6 +609,28 @@ def _is_integer(value: Any) -> bool:
         return False
     if isinstance(value, Integral):
         return True
+    if isinstance(value, Decimal):
+        return value.is_finite() and value == value.to_integral_value()
     if isinstance(value, Real):
         return value.is_integer()
     return False
+
+
+def _safe_decimal(value: Any) -> Decimal | None:
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return decimal_value if decimal_value.is_finite() else None
+
+
+def _normalize_decimal_value(value: Any) -> Any:
+    if _is_missing(value):
+        return value
+    if _is_number(value):
+        decimal_value = _safe_decimal(value)
+        return value if decimal_value is None else decimal_value
+    if isinstance(value, str):
+        decimal_value = _safe_decimal(value.strip().replace(",", ""))
+        return value if decimal_value is None else decimal_value
+    return value

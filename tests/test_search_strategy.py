@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.ai_engine.search_filters import SearchFilters
 from app.ai_engine.search_strategy import (
+    AlternativeDropRule,
     ConstraintStrength,
     MatchMode,
     RankingPreference,
@@ -50,6 +51,83 @@ def test_populated_field_can_have_a_ranking_preference():
     )
 
     assert strategy.ranking_preferences[0].field is SearchField.LOCATION
+
+
+def test_populated_soft_field_can_have_an_alternative_drop_rule():
+    strategy = SearchStrategy(
+        filters=SearchFilters(property_type="Apartment"),
+        constraints=[SearchConstraint(field="property_type", strength="soft")],
+        alternative_drop_rules=[AlternativeDropRule(field="property_type")],
+    )
+
+    assert strategy.alternative_drop_rules[0].field is SearchField.PROPERTY_TYPE
+
+
+def test_hard_unclassified_and_unpopulated_drop_rules_are_rejected():
+    with pytest.raises(ValidationError, match="only allowed for soft"):
+        SearchStrategy(
+            filters=SearchFilters(location="New Cairo"),
+            constraints=[SearchConstraint(field="location", strength="hard")],
+            alternative_drop_rules=[AlternativeDropRule(field="location")],
+        )
+
+    with pytest.raises(ValidationError, match="classified constraint"):
+        SearchStrategy(
+            filters=SearchFilters(bedrooms=3),
+            alternative_drop_rules=[AlternativeDropRule(field="bedrooms")],
+        )
+
+    with pytest.raises(ValidationError, match="populated filter"):
+        SearchStrategy(
+            filters=SearchFilters(bedrooms=3),
+            constraints=[SearchConstraint(field="bedrooms", strength="soft")],
+            alternative_drop_rules=[AlternativeDropRule(field="bathrooms")],
+        )
+
+
+def test_duplicate_and_non_positive_alternative_drop_rules_are_rejected():
+    with pytest.raises(ValidationError, match="drop-rule fields must be unique"):
+        SearchStrategy(
+            filters=SearchFilters(bedrooms=3),
+            constraints=[SearchConstraint(field="bedrooms", strength="soft")],
+            alternative_drop_rules=[
+                AlternativeDropRule(field="bedrooms"),
+                AlternativeDropRule(field="bedrooms", priority=2),
+            ],
+        )
+
+    with pytest.raises(ValidationError):
+        AlternativeDropRule(field="bedrooms", priority=0)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("bedrooms", 3),
+    ("location", "New Cairo"),
+    ("property_type", "Apartment"),
+    ("payment_method", "Cash"),
+])
+def test_all_search_field_types_may_be_explicitly_droppable(field, value):
+    strategy = SearchStrategy(
+        filters=SearchFilters(**{field: value}),
+        constraints=[SearchConstraint(field=field, strength="soft")],
+        alternative_drop_rules=[AlternativeDropRule(field=field)],
+    )
+
+    assert strategy.alternative_drop_rules[0].field.value == field
+
+
+def test_model_dump_json_includes_alternative_drop_rules():
+    strategy = SearchStrategy(
+        filters=SearchFilters(property_type="Apartment"),
+        constraints=[SearchConstraint(field="property_type", strength="soft")],
+        alternative_drop_rules=[AlternativeDropRule(field="property_type", priority=2)],
+    )
+
+    dumped = strategy.model_dump(mode="json")
+
+    assert dumped["alternative_drop_rules"] == [
+        {"field": "property_type", "priority": 2}
+    ]
 
 
 @pytest.mark.parametrize("match_mode", [MatchMode.NEAR, MatchMode.ALTERNATIVE])
