@@ -1,7 +1,6 @@
 import copy
 
 import pytest
-from pydantic import ValidationError
 
 from app.ai_engine import search_plan_builder
 from app.ai_engine.search_filters import SearchFilters
@@ -9,6 +8,8 @@ from app.ai_engine.search_plan_builder import build_search_plan
 from app.ai_engine.search_strategy import NUMERIC_RELAXABLE_FIELDS
 from app.ai_engine.search_planner import AdjustmentAction
 from app.ai_engine.search_strategy import (
+    AlternativeDropRule,
+    ConstraintStrength,
     MatchMode,
     RelaxationDirection,
     RelaxationRule,
@@ -18,14 +19,19 @@ from app.ai_engine.search_strategy import (
 )
 
 
-def _strategy(filters, rules, mode=MatchMode.NEAR):
+def _strategy(filters, rules, mode=MatchMode.NEAR, drop_rules=None):
+    drop_rules = drop_rules or []
+    referenced_fields = {rule.field for rule in rules + drop_rules}
     return SearchStrategy(
         filters=filters,
         match_mode=mode,
         constraints=[
-            SearchConstraint(field=rule.field, strength="soft") for rule in rules
+            SearchConstraint(field=field, strength="soft")
+            for field in SearchField
+            if field in referenced_fields
         ],
         relaxation_rules=rules,
+        alternative_drop_rules=drop_rules,
     )
 
 
@@ -37,6 +43,10 @@ def _rule(field, direction, priority=1, max_delta=None, max_percentage=None):
         max_delta=max_delta,
         max_percentage=max_percentage,
     )
+
+
+def _drop_rule(field, priority=1):
+    return AlternativeDropRule(field=field, priority=priority)
 
 
 def test_exact_mode_returns_unchanged_exact_only_plan_without_mutating_filters():
@@ -130,6 +140,306 @@ def test_planner_direction_metadata_covers_numeric_relaxable_fields():
     assert set(search_plan_builder.USEFUL_RELAXATION_DIRECTIONS) == set(
         NUMERIC_RELAXABLE_FIELDS
     )
+
+
+def test_alternative_mode_generates_a_controlled_soft_drop():
+    strategy = _strategy(
+        SearchFilters(property_type="Apartment"),
+        [],
+        mode=MatchMode.ALTERNATIVE,
+        drop_rules=[_drop_rule(SearchField.PROPERTY_TYPE)],
+    )
+
+    plan = build_search_plan(strategy)
+
+    assert [attempt.mode for attempt in plan.attempts] == [
+        MatchMode.EXACT,
+        MatchMode.ALTERNATIVE,
+    ]
+    alternative = plan.attempts[1]
+    assert alternative.filters.property_type is None
+    assert alternative.adjustments[0].action is AdjustmentAction.DROPPED
+
+
+@pytest.mark.parametrize("mode", [MatchMode.EXACT, MatchMode.NEAR])
+def test_exact_and_near_modes_never_generate_alternatives(mode):
+    strategy = _strategy(
+        SearchFilters(max_price=8_000_000, payment_method="Installment"),
+        [_rule(SearchField.MAX_PRICE, "increase", max_delta=400_000)],
+        mode=mode,
+        drop_rules=[_drop_rule(SearchField.PAYMENT_METHOD)],
+    )
+
+    plan = build_search_plan(strategy)
+
+    assert all(attempt.mode is not MatchMode.ALTERNATIVE for attempt in plan.attempts)
+    assert len(plan.attempts) == (1 if mode is MatchMode.EXACT else 2)
+
+
+def test_alternative_without_drop_rules_preserves_numeric_near_behavior():
+    plan = build_search_plan(
+        _strategy(
+            SearchFilters(max_price=8_000_000),
+            [_rule(SearchField.MAX_PRICE, "increase", max_delta=400_000)],
+            mode=MatchMode.ALTERNATIVE,
+        )
+    )
+
+    assert [attempt.mode for attempt in plan.attempts] == [
+        MatchMode.EXACT,
+        MatchMode.NEAR,
+    ]
+
+
+def test_alternative_drop_tiers_are_cumulative_and_ordered():
+    plan = build_search_plan(
+        _strategy(
+            SearchFilters(
+                payment_method="Installment",
+                property_type="Apartment",
+            ),
+            [],
+            mode=MatchMode.ALTERNATIVE,
+            drop_rules=[
+                _drop_rule(SearchField.PROPERTY_TYPE, priority=2),
+                _drop_rule(SearchField.PAYMENT_METHOD, priority=1),
+            ],
+        )
+    )
+
+    assert [
+        (attempt.filters.payment_method, attempt.filters.property_type)
+        for attempt in plan.attempts[1:]
+    ] == [(None, "Apartment"), (None, None)]
+
+
+def test_same_priority_drop_rules_apply_together_and_input_order_is_irrelevant():
+    filters = SearchFilters(
+        payment_method="Installment",
+        property_type="Apartment",
+    )
+    first = build_search_plan(
+        _strategy(
+            filters,
+            [],
+            mode=MatchMode.ALTERNATIVE,
+            drop_rules=[
+                _drop_rule(SearchField.PROPERTY_TYPE),
+                _drop_rule(SearchField.PAYMENT_METHOD),
+            ],
+        )
+    ).model_dump(mode="json")
+    second = build_search_plan(
+        _strategy(
+            filters,
+            [],
+            mode=MatchMode.ALTERNATIVE,
+            drop_rules=[
+                _drop_rule(SearchField.PAYMENT_METHOD),
+                _drop_rule(SearchField.PROPERTY_TYPE),
+            ],
+        )
+    ).model_dump(mode="json")
+
+    assert first == second
+    assert first["attempts"][-1]["filters"]["payment_method"] is None
+    assert first["attempts"][-1]["filters"]["property_type"] is None
+
+
+def test_numeric_near_widening_is_preserved_before_alternative_drop():
+    plan = build_search_plan(
+        _strategy(
+            SearchFilters(max_price=8_000_000, payment_method="Installment"),
+            [_rule(SearchField.MAX_PRICE, "increase", max_percentage=5)],
+            mode=MatchMode.ALTERNATIVE,
+            drop_rules=[_drop_rule(SearchField.PAYMENT_METHOD)],
+        )
+    )
+
+    alternative = plan.attempts[2]
+    changes = {adjustment.field: adjustment for adjustment in alternative.adjustments}
+    assert alternative.filters.max_price == 8_400_000
+    assert alternative.filters.payment_method is None
+    assert changes[SearchField.MAX_PRICE].action is AdjustmentAction.WIDENED
+    assert changes[SearchField.PAYMENT_METHOD].action is AdjustmentAction.DROPPED
+    assert changes[SearchField.MAX_PRICE].original_value == 8_000_000
+    assert changes[SearchField.PAYMENT_METHOD].original_value == "Installment"
+
+
+def test_multiple_numeric_frontier_seeds_each_receive_alternative_drop():
+    plan = build_search_plan(
+        _strategy(
+            SearchFilters(bedrooms=3, property_type="Apartment"),
+            [_rule(SearchField.BEDROOMS, "both", max_delta=1)],
+            mode=MatchMode.ALTERNATIVE,
+            drop_rules=[_drop_rule(SearchField.PROPERTY_TYPE)],
+        )
+    )
+
+    assert [
+        (attempt.filters.bedrooms, attempt.filters.property_type)
+        for attempt in plan.attempts
+    ] == [(3, "Apartment"), (2, "Apartment"), (4, "Apartment"), (2, None), (4, None)]
+
+
+def test_explicit_numeric_drop_is_allowed_but_not_inferred():
+    explicit_plan = build_search_plan(
+        _strategy(
+            SearchFilters(max_price=8_000_000),
+            [],
+            mode=MatchMode.ALTERNATIVE,
+            drop_rules=[_drop_rule(SearchField.MAX_PRICE)],
+        )
+    )
+    implicit_plan = build_search_plan(
+        _strategy(
+            SearchFilters(max_price=8_000_000),
+            [_rule(SearchField.MAX_PRICE, "increase", max_delta=400_000)],
+            mode=MatchMode.ALTERNATIVE,
+        )
+    )
+
+    assert explicit_plan.attempts[1].filters.max_price is None
+    assert implicit_plan.attempts[-1].filters.max_price == 8_400_000
+    assert all(attempt.mode is not MatchMode.ALTERNATIVE for attempt in implicit_plan.attempts)
+
+
+def test_invalid_hard_drop_rule_fails_defensively():
+    strategy = SearchStrategy.model_construct(
+        filters=SearchFilters(location="New Cairo"),
+        constraints=[
+            SearchConstraint(field=SearchField.LOCATION, strength=ConstraintStrength.HARD)
+        ],
+        match_mode=MatchMode.ALTERNATIVE,
+        ranking_preferences=[],
+        relaxation_rules=[],
+        alternative_drop_rules=[_drop_rule(SearchField.LOCATION)],
+        requested_scope_keys=None,
+    )
+
+    with pytest.raises(ValueError, match="HARD"):
+        build_search_plan(strategy)
+
+
+def test_alternative_cap_preserves_earliest_frontier_drop_states(monkeypatch):
+    monkeypatch.setattr(search_plan_builder, "MAX_ALTERNATIVE_ATTEMPTS", 4)
+    strategy = _strategy(
+        SearchFilters(
+            bedrooms=3,
+            bathrooms=2,
+            location="New Cairo",
+            property_type="Apartment",
+            payment_method="Installment",
+        ),
+        [
+            _rule(SearchField.BEDROOMS, "both", max_delta=1),
+            _rule(SearchField.BATHROOMS, "both", max_delta=1),
+        ],
+        mode=MatchMode.ALTERNATIVE,
+        drop_rules=[
+            _drop_rule(SearchField.LOCATION, priority=1),
+            _drop_rule(SearchField.PROPERTY_TYPE, priority=2),
+            _drop_rule(SearchField.PAYMENT_METHOD, priority=3),
+        ],
+    )
+
+    plan = build_search_plan(strategy)
+
+    assert sum(attempt.mode is MatchMode.ALTERNATIVE for attempt in plan.attempts) == 4
+    assert [
+        (attempt.filters.bedrooms, attempt.filters.bathrooms, attempt.filters.location)
+        for attempt in plan.attempts[-4:]
+    ] == [
+        (2, 2, None),
+        (4, 2, None),
+        (3, 1, None),
+        (3, 3, None),
+    ]
+
+
+def test_alternative_seeds_only_from_near_states_admitted_before_cap(monkeypatch):
+    monkeypatch.setattr(search_plan_builder, "MAX_NEAR_ATTEMPTS", 3)
+    strategy = _strategy(
+        SearchFilters(
+            bedrooms=3,
+            bathrooms=2,
+            location="New Cairo",
+        ),
+        [
+            _rule(SearchField.BEDROOMS, "both", max_delta=1),
+            _rule(SearchField.BATHROOMS, "both", max_delta=1),
+        ],
+        mode=MatchMode.ALTERNATIVE,
+        drop_rules=[_drop_rule(SearchField.LOCATION)],
+    )
+
+    plan = build_search_plan(strategy)
+
+    assert [
+        (attempt.filters.bedrooms, attempt.filters.bathrooms)
+        for attempt in plan.attempts
+        if attempt.mode is MatchMode.NEAR
+    ] == [(2, 2), (4, 2), (3, 1)]
+    assert [
+        (attempt.filters.bedrooms, attempt.filters.bathrooms)
+        for attempt in plan.attempts
+        if attempt.mode is MatchMode.ALTERNATIVE
+    ] == [(2, 2), (4, 2), (3, 1)]
+    assert (3, 3) not in [
+        (attempt.filters.bedrooms, attempt.filters.bathrooms)
+        for attempt in plan.attempts
+        if attempt.mode is MatchMode.ALTERNATIVE
+    ]
+
+
+def test_invalid_later_numeric_tier_preserves_last_admitted_frontier():
+    strategy = _strategy(
+        SearchFilters(
+            max_price=8_000_000,
+            bedrooms=0,
+            location="New Cairo",
+        ),
+        [
+            _rule(SearchField.MAX_PRICE, "increase", priority=1, max_percentage=5),
+            _rule(SearchField.BEDROOMS, "decrease", priority=2, max_delta=1),
+        ],
+        mode=MatchMode.ALTERNATIVE,
+        drop_rules=[_drop_rule(SearchField.LOCATION)],
+    )
+
+    plan = build_search_plan(strategy)
+
+    assert plan.attempts[1].filters.max_price == 8_400_000
+    assert plan.attempts[1].filters.bedrooms == 0
+    alternative = plan.attempts[2]
+    assert alternative.filters.max_price == 8_400_000
+    assert alternative.filters.location is None
+    changes = {adjustment.field: adjustment for adjustment in alternative.adjustments}
+    assert changes[SearchField.MAX_PRICE].action is AdjustmentAction.WIDENED
+    assert changes[SearchField.MAX_PRICE].original_value == 8_000_000
+    assert changes[SearchField.LOCATION].action is AdjustmentAction.DROPPED
+    assert changes[SearchField.LOCATION].original_value == "New Cairo"
+
+
+def test_numeric_field_can_be_relaxed_then_explicitly_dropped():
+    strategy = SearchStrategy(
+        filters=SearchFilters(max_price=8_000_000),
+        constraints=[SearchConstraint(field=SearchField.MAX_PRICE, strength="soft")],
+        relaxation_rules=[
+            _rule(SearchField.MAX_PRICE, "increase", max_percentage=5)
+        ],
+        alternative_drop_rules=[_drop_rule(SearchField.MAX_PRICE)],
+        match_mode=MatchMode.ALTERNATIVE,
+    )
+
+    plan = build_search_plan(strategy)
+
+    assert plan.attempts[1].filters.max_price == 8_400_000
+    alternative = plan.attempts[2]
+    assert alternative.filters.max_price is None
+    assert alternative.adjustments[0].field is SearchField.MAX_PRICE
+    assert alternative.adjustments[0].action is AdjustmentAction.DROPPED
+    assert alternative.adjustments[0].original_value == 8_000_000
 
 
 def test_max_price_delta_and_percentage_relaxations_use_baseline():

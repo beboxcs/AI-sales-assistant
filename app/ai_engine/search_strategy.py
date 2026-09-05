@@ -41,6 +41,11 @@ class SearchConstraint(BaseModel):
     strength: ConstraintStrength
 
 
+class AlternativeDropRule(BaseModel):
+    field: SearchField
+    priority: int = Field(default=1, gt=0)
+
+
 class RankingPreference(BaseModel):
     field: SearchField
     weight: float = Field(gt=0, allow_inf_nan=False)
@@ -100,6 +105,7 @@ class SearchStrategy(BaseModel):
     match_mode: MatchMode = MatchMode.EXACT
     ranking_preferences: list[RankingPreference] = Field(default_factory=list)
     relaxation_rules: list[RelaxationRule] = Field(default_factory=list)
+    alternative_drop_rules: list[AlternativeDropRule] = Field(default_factory=list)
     requested_scope_keys: list[str] | None = None
 
     @field_validator("requested_scope_keys")
@@ -203,6 +209,27 @@ class SearchStrategy(BaseModel):
             if strength is not ConstraintStrength.SOFT:
                 raise ValueError(
                     "relaxation rules are only allowed for soft constraints: "
+                    f"{rule.field.value}"
+                )
+
+        drop_fields = [rule.field for rule in self.alternative_drop_rules]
+        if len(drop_fields) != len(set(drop_fields)):
+            raise ValueError("alternative drop-rule fields must be unique")
+        for rule in self.alternative_drop_rules:
+            if rule.field.value not in populated_fields:
+                raise ValueError(
+                    "alternative drop-rule field must reference a populated filter: "
+                    f"{rule.field.value}"
+                )
+            strength = constraint_strengths.get(rule.field)
+            if strength is None:
+                raise ValueError(
+                    "alternative drop-rule field must reference a classified "
+                    f"constraint: {rule.field.value}"
+                )
+            if strength is not ConstraintStrength.SOFT:
+                raise ValueError(
+                    "alternative drop rules are only allowed for soft constraints: "
                     f"{rule.field.value}"
                 )
         return self
