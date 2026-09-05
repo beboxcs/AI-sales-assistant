@@ -57,16 +57,16 @@ def search_candidates(
         ] = payment_plan
         plan_scope_keys.setdefault(payment_plan.unit_id, set()).add(scope_key)
 
-    plan_filters_applied = _has_payment_plan_filters(filters)
+    plan_semantics_active = _has_payment_plan_filters(filters)
     candidates: list[UnitCandidate] = []
     for unit_id in sorted(units_by_id):
-        if plan_filters_applied and unit_id not in plan_scope_keys:
+        if plan_semantics_active and unit_id not in plan_scope_keys:
             continue
 
         unit, compound = units_by_id[unit_id]
         matching_scope_keys = (
             plan_scope_keys.get(unit_id, set())
-            if plan_filters_applied
+            if plan_semantics_active
             else unit_scope_keys[unit_id]
         )
         payment_plans = tuple(
@@ -130,6 +130,7 @@ def _eligible_units_statement(
         )
         .where(
             Unit.company_id == context.company_id,
+            Unit.status == UnitStatus.AVAILABLE.value,
             Compound.company_id == context.company_id,
             UnitInventoryState.company_id == context.company_id,
             UnitInventoryState.is_present_in_latest_inventory.is_(True),
@@ -147,10 +148,11 @@ def _eligible_units_statement(
         statement = statement.where(Unit.bedrooms == filters.bedrooms)
     if filters.bathrooms is not None:
         statement = statement.where(Unit.bathrooms == filters.bathrooms)
-    if filters.min_price is not None:
-        statement = statement.where(Unit.base_price >= filters.min_price)
-    if filters.max_price is not None:
-        statement = statement.where(Unit.base_price <= filters.max_price)
+    if not _has_payment_plan_filters(filters):
+        if filters.min_price is not None:
+            statement = statement.where(Unit.base_price >= filters.min_price)
+        if filters.max_price is not None:
+            statement = statement.where(Unit.base_price <= filters.max_price)
     if filters.min_area_sqm is not None:
         statement = statement.where(Unit.area_sqm >= filters.min_area_sqm)
     if filters.max_area_sqm is not None:
@@ -217,6 +219,15 @@ def _eligible_plans_statement(
         statement = statement.where(
             PaymentPlan.installment_years >= filters.min_installment_years
         )
+    if _has_payment_plan_filters(filters):
+        if filters.min_price is not None:
+            statement = statement.where(
+                PaymentPlan.total_price >= filters.min_price
+            )
+        if filters.max_price is not None:
+            statement = statement.where(
+                PaymentPlan.total_price <= filters.max_price
+            )
 
     return statement
 
