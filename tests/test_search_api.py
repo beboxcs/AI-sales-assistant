@@ -15,6 +15,11 @@ from app.api.v1 import search as search_route
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
 from app.main import app
 from app.search.contracts import PaymentPlanCandidate, SearchExecutionContext, UnitCandidate
+from app.search.exceptions import (
+    InvalidSearchScopeError,
+    SearchScopeResolutionFailedError,
+)
+from app.search.scope_resolution import resolve_search_execution_context
 
 
 @dataclass(frozen=True)
@@ -196,6 +201,17 @@ def test_requested_scope_keys_empty_list_is_invalid(client):
     assert response.status_code == 422
 
 
+def test_duplicate_requested_scope_keys_are_invalid(client):
+    test_client, _, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        json={"requested_scope_keys": ["scope:a", "scope:a"]},
+    )
+
+    assert response.status_code == 422
+
+
 def test_requested_scope_keys_preserves_request_order(client):
     test_client, calls, _ = client
 
@@ -209,6 +225,72 @@ def test_requested_scope_keys_preserves_request_order(client):
         42,
         ("scope:c", "scope:a", "scope:b"),
     )
+
+
+def test_invalid_search_scope_error_maps_to_generic_404(monkeypatch):
+    response = _request_with_failing_resolver(
+        monkeypatch,
+        InvalidSearchScopeError("private tenant scope details"),
+    )
+
+    assert response.status_code == 404
+    assert response.json() == _invalid_scope_response()
+    assert "private tenant scope details" not in response.text
+
+
+def test_unknown_and_cross_tenant_scope_errors_use_same_public_404(monkeypatch):
+    unknown_response = _request_with_failing_resolver(
+        monkeypatch,
+        InvalidSearchScopeError("unknown scope"),
+    )
+    cross_tenant_response = _request_with_failing_resolver(
+        monkeypatch,
+        InvalidSearchScopeError("cross tenant scope"),
+    )
+
+    assert unknown_response.status_code == 404
+    assert cross_tenant_response.status_code == 404
+    assert unknown_response.json() == cross_tenant_response.json()
+    assert unknown_response.json() == _invalid_scope_response()
+    assert "unknown scope" not in unknown_response.text
+    assert "cross tenant scope" not in cross_tenant_response.text
+
+
+def test_scope_resolution_failure_maps_to_safe_generic_500(monkeypatch):
+    response = _request_with_failing_resolver(
+        monkeypatch,
+        SearchScopeResolutionFailedError("database host secret"),
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "SEARCH_CONTEXT_RESOLUTION_FAILED",
+            "message": "Search context could not be resolved",
+        }
+    }
+    assert "database host secret" not in response.text
+
+
+def test_unexpected_resolver_exception_maps_to_safe_generic_500(monkeypatch):
+    response = _request_with_failing_resolver(
+        monkeypatch,
+        RuntimeError("postgresql://secret SELECT hidden_scope_table"),
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "SEARCH_CONTEXT_RESOLUTION_FAILED",
+            "message": "Search context could not be resolved",
+        }
+    }
+    assert "postgresql://secret" not in response.text
+    assert "hidden_scope_table" not in response.text
+
+
+def test_resolver_dependency_is_wired_to_real_backend_resolver():
+    assert get_search_context_resolver() is resolve_search_execution_context
 
 
 def test_api_never_constructs_search_execution_context_directly():
@@ -334,6 +416,38 @@ def test_no_sqlalchemy_or_session_use_exists_in_api_route():
     assert "get_db" not in source
     assert "search.repository" not in source
     assert "search_service" not in source
+
+
+def _request_with_failing_resolver(monkeypatch, error: Exception):
+    original_overrides = app.dependency_overrides.copy()
+
+    def resolver(*, company_id, requested_scope_keys):
+        raise error
+
+    app.dependency_overrides[get_trusted_company_id] = lambda: 42
+    app.dependency_overrides[get_search_context_resolver] = lambda: resolver
+    monkeypatch.setattr(
+        search_route.search_application,
+        "search_units",
+        lambda **_: _search_result(),
+    )
+
+    try:
+        return TestClient(app).post(
+            "/api/v1/search",
+            json={"requested_scope_keys": ["scope:private"]},
+        )
+    finally:
+        app.dependency_overrides = original_overrides
+
+
+def _invalid_scope_response():
+    return {
+        "error": {
+            "code": "SEARCH_SCOPE_NOT_FOUND",
+            "message": "Search scope selection was not found",
+        }
+    }
 
 
 def _search_result() -> FakeSearchResult:

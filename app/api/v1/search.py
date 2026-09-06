@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.ai_engine import search_application
 from app.ai_engine.search_filters import SearchFilters
@@ -13,6 +13,10 @@ from app.api.dependencies import (
     get_trusted_company_id,
 )
 from app.api.errors import APIError
+from app.search.exceptions import (
+    InvalidSearchScopeError,
+    SearchScopeResolutionFailedError,
+)
 
 router = APIRouter(tags=["search"])
 
@@ -32,6 +36,18 @@ class SearchRequest(BaseModel):
     max_down_payment: float | None = Field(default=None, ge=0)
     min_installment_years: float | None = Field(default=None, gt=0)
     requested_scope_keys: list[str] | None = Field(default=None, min_length=1)
+
+    @field_validator("requested_scope_keys")
+    @classmethod
+    def requested_scope_keys_must_be_unique(
+        cls,
+        value: list[str] | None,
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        if len(set(value)) != len(value):
+            raise ValueError("requested_scope_keys must not contain duplicates")
+        return value
 
     def to_filters(self) -> SearchFilters:
         return SearchFilters(
@@ -127,6 +143,18 @@ def search_units(
             company_id=company_id,
             requested_scope_keys=request.requested_scope_tuple(),
         )
+    except InvalidSearchScopeError as exc:
+        raise APIError(
+            status_code=404,
+            code="SEARCH_SCOPE_NOT_FOUND",
+            message="Search scope selection was not found",
+        ) from exc
+    except SearchScopeResolutionFailedError as exc:
+        raise APIError(
+            status_code=500,
+            code="SEARCH_CONTEXT_RESOLUTION_FAILED",
+            message="Search context could not be resolved",
+        ) from exc
     except APIError:
         raise
     except Exception as exc:

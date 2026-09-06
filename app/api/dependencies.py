@@ -3,6 +3,7 @@ from typing import Protocol
 from app.config import settings
 from app.database import get_db as get_db_session
 from app.search.contracts import SearchExecutionContext
+from app.search.scope_resolution import resolve_search_execution_context
 
 
 class SearchContextResolver(Protocol):
@@ -19,16 +20,7 @@ def get_trusted_company_id() -> int:
 
 
 def get_search_context_resolver() -> SearchContextResolver:
-    def resolver(
-        *,
-        company_id: int,
-        requested_scope_keys: tuple[str, ...] | None,
-    ) -> SearchExecutionContext:
-        raise NotImplementedError(
-            "Search execution context resolver is not wired yet"
-        )
-
-    return resolver
+    return resolve_search_execution_context
 
 __all__ = [
     "SearchContextResolver",
