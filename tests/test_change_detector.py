@@ -2,12 +2,33 @@ import json
 from datetime import date
 
 import pytest
+from pydantic import ValidationError
 
 from app.ai_engine.change_detector import (
+    InventoryChange,
     InventoryChangeType,
     PaymentPlanChangeType,
     detect_inventory_changes,
 )
+
+
+def test_inventory_change_strips_compound_key_whitespace():
+    change = InventoryChange(
+        compound_key="  compound-a  ",
+        external_unit_id="A101",
+        change_type=InventoryChangeType.ADDED,
+    )
+
+    assert change.compound_key == "compound-a"
+
+
+def test_inventory_change_rejects_empty_compound_key():
+    with pytest.raises(ValidationError, match="compound_key"):
+        InventoryChange(
+            compound_key=" ",
+            external_unit_id="A101",
+            change_type=InventoryChangeType.ADDED,
+        )
 from app.ai_engine.schemas import (
     InventorySnapshot,
     PaymentMethod,
@@ -37,6 +58,7 @@ def test_detect_inventory_changes_reports_added_unit():
 
     assert [change.external_unit_id for change in changes] == ["A102"]
     assert changes[0].change_type == InventoryChangeType.ADDED
+    assert changes[0].compound_key == "compound-a"
     assert changes[0].changes == {}
     assert changes[0].payment_plan_changes == []
 
@@ -49,6 +71,7 @@ def test_detect_inventory_changes_reports_missing_unit_without_marking_sold():
 
     assert [change.external_unit_id for change in changes] == ["A102"]
     assert changes[0].change_type == InventoryChangeType.MISSING
+    assert changes[0].compound_key == "compound-a"
     assert "status" not in changes[0].changes
 
 
@@ -61,10 +84,10 @@ def test_detect_inventory_changes_reports_base_price_update():
     assert len(changes) == 1
     assert changes[0].change_type == InventoryChangeType.UPDATED
     assert set(changes[0].changes) == {"base_price"}
-    assert changes[0].changes["base_price"].old == 5500000.0
-    assert changes[0].changes["base_price"].new == 5800000.0
-    assert isinstance(changes[0].changes["base_price"].old, float)
-    assert isinstance(changes[0].changes["base_price"].new, float)
+    assert changes[0].changes["base_price"].old == "5500000.0"
+    assert changes[0].changes["base_price"].new == "5800000.0"
+    assert isinstance(changes[0].changes["base_price"].old, str)
+    assert isinstance(changes[0].changes["base_price"].new, str)
 
 
 def test_detect_inventory_changes_serializes_delivery_date_changes_as_iso_strings():
@@ -152,8 +175,8 @@ def test_detect_inventory_changes_reports_payment_plan_updated():
     assert len(plan_changes) == 1
     assert plan_changes[0].change_type == PaymentPlanChangeType.UPDATED
     assert set(plan_changes[0].changes) == {"total_price"}
-    assert plan_changes[0].changes["total_price"].old == 5800000.0
-    assert plan_changes[0].changes["total_price"].new == 6000000.0
+    assert plan_changes[0].changes["total_price"].old == "5800000.0"
+    assert plan_changes[0].changes["total_price"].new == "6000000.0"
 
 
 def test_inventory_change_model_dump_json_contains_json_compatible_values():
@@ -161,6 +184,7 @@ def test_inventory_change_model_dump_json_contains_json_compatible_values():
         _snapshot(
             units=[
                 _unit(
+                    base_price=5500000.0,
                     delivery_date=date(2027, 5, 1),
                     payment_plans=[_plan(payment_method=PaymentMethod.INSTALLMENT)],
                 )
@@ -169,6 +193,7 @@ def test_inventory_change_model_dump_json_contains_json_compatible_values():
         _snapshot(
             units=[
                 _unit(
+                    base_price=5600000.0,
                     delivery_date=date(2028, 6, 15),
                     payment_plans=[
                         _plan(
@@ -185,6 +210,10 @@ def test_inventory_change_model_dump_json_contains_json_compatible_values():
 
     json.dumps(dumped_change)
     assert dumped_change["changes"]["delivery_date"]["old"] == "2027-05-01"
+    assert dumped_change["changes"]["base_price"] == {
+        "old": "5500000.0",
+        "new": "5600000.0",
+    }
     assert dumped_change["payment_plan_changes"][0]["changes"]["payment_method"] == {
         "old": "Installment",
         "new": "Cash",
@@ -258,6 +287,44 @@ def test_detect_inventory_changes_orders_unit_changes_deterministically():
     assert [change.external_unit_id for change in changes] == ["A", "B", "C"]
 
 
+def test_detect_inventory_changes_uses_composite_unit_identity():
+    previous = _snapshot(
+        units=[
+            _unit(compound_key="compound-a", base_price=5500000),
+            _unit(compound_key="compound-b", base_price=6500000),
+        ]
+    )
+    current = _snapshot(
+        units=[
+            _unit(compound_key="compound-a", base_price=5500000),
+            _unit(compound_key="compound-b", base_price=6800000),
+        ]
+    )
+
+    changes = detect_inventory_changes(previous, current)
+
+    assert len(changes) == 1
+    assert changes[0].compound_key == "compound-b"
+    assert changes[0].external_unit_id == "A101"
+
+
+def test_detect_inventory_changes_reports_composite_identity_for_missing_unit():
+    previous = _snapshot(
+        units=[
+            _unit(compound_key="compound-a"),
+            _unit(compound_key="compound-b"),
+        ]
+    )
+    current = _snapshot(units=[_unit(compound_key="compound-a")])
+
+    changes = detect_inventory_changes(previous, current)
+
+    assert len(changes) == 1
+    assert changes[0].change_type == InventoryChangeType.MISSING
+    assert changes[0].compound_key == "compound-b"
+    assert changes[0].external_unit_id == "A101"
+
+
 def test_detect_inventory_changes_does_not_mutate_inputs():
     previous = _snapshot(units=[_unit(payment_plans=[_plan(total_price=5800000.0)])])
     current = _snapshot(units=[_unit(payment_plans=[_plan(total_price=6000000.0)])])
@@ -290,6 +357,7 @@ def _plan(**overrides) -> PaymentPlanSchema:
 def _unit(**overrides) -> UnitSchema:
     data = {
         "external_unit_id": "A101",
+        "compound_key": "compound-a",
         "compound_name": "Nile Gardens",
         "location": "New Cairo",
         "property_type": "Apartment",

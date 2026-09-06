@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
@@ -153,13 +154,13 @@ def _extract_max_down_payment(text: str) -> float | None:
     return _extract_first_money_match(text, patterns)
 
 
-def _extract_first_money_match(text: str, patterns: list[str]) -> float | None:
-    values: set[float] = set()
+def _extract_first_money_match(text: str, patterns: list[str]) -> Decimal | None:
+    values: set[Decimal] = set()
 
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             parsed_value = normalize_money(match.group("money"))
-            if isinstance(parsed_value, float):
+            if isinstance(parsed_value, Decimal):
                 values.add(parsed_value)
 
     if len(values) > 1:

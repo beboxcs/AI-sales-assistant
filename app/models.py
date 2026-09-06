@@ -54,12 +54,18 @@ class Compound(Base):
         UniqueConstraint(
             "company_id", "id", name="uq_compounds_company_id_id"
         ),
+        UniqueConstraint(
+            "company_id",
+            "compound_key",
+            name="uq_compounds_company_compound_key",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     company_id: Mapped[int] = mapped_column(
         ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False
     )
+    compound_key: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     location: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

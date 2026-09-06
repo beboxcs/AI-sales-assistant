@@ -46,6 +46,67 @@ def db_session() -> Generator[Session, None, None]:
         connection.close()
 
 
+def test_duplicate_compound_key_within_company_is_rejected(
+    db_session: Session,
+):
+    company_id = _test_id()
+    compound_key = f"compound:{uuid4().hex}"
+    company = Company(id=company_id, name="Compound Key Test")
+    first_compound = Compound(
+        id=_test_id(),
+        company_id=company_id,
+        compound_key=compound_key,
+        name="First Compound",
+        location="New Cairo",
+    )
+    db_session.add_all([company, first_compound])
+    db_session.flush()
+
+    duplicate = Compound(
+        id=_test_id(),
+        company_id=company_id,
+        compound_key=compound_key,
+        name="Second Compound",
+        location="Sheikh Zayed",
+    )
+
+    _assert_rejected_by(
+        db_session,
+        duplicate,
+        "uq_compounds_company_compound_key",
+    )
+
+
+def test_same_compound_key_is_allowed_for_different_companies(
+    db_session: Session,
+):
+    company_a_id = _test_id()
+    company_b_id = _test_id()
+    compound_key = f"compound:{uuid4().hex}"
+    company_a = Company(id=company_a_id, name="Company A")
+    company_b = Company(id=company_b_id, name="Company B")
+    compound_a = Compound(
+        id=_test_id(),
+        company_id=company_a_id,
+        compound_key=compound_key,
+        name="Company A Compound",
+        location="New Cairo",
+    )
+    compound_b = Compound(
+        id=_test_id(),
+        company_id=company_b_id,
+        compound_key=compound_key,
+        name="Company B Compound",
+        location="New Cairo",
+    )
+
+    db_session.add_all([company_a, company_b, compound_a, compound_b])
+    db_session.flush()
+
+    assert compound_a.compound_key == compound_b.compound_key
+    assert compound_a.company_id != compound_b.company_id
+
+
 def test_unit_inventory_state_rejects_cross_company_scope(
     db_session: Session,
 ):
@@ -229,6 +290,7 @@ def _seed_tenant(db_session: Session, label: str) -> TenantData:
     compound = Compound(
         id=entity_id,
         company_id=company.id,
+        compound_key=f"compound:{token}",
         name=f"Compound {token}",
         location=f"Location {token}",
     )
