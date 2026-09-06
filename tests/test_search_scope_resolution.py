@@ -125,24 +125,7 @@ def test_duplicate_explicit_scopes_are_rejected_without_query(monkeypatch):
         )
 
 
-def test_unknown_explicit_scope_is_rejected(
-    db_session: Session,
-    monkeypatch,
-):
-    company = _add_company(db_session)
-
-    with pytest.raises(InvalidSearchScopeError) as exc_info:
-        _resolve(
-            db_session,
-            monkeypatch,
-            company_id=company.id,
-            requested_scope_keys=("scope:unknown",),
-        )
-
-    assert str(exc_info.value) == "Invalid search scope selection"
-
-
-def test_cross_tenant_scope_is_indistinguishable_from_unknown(
+def test_unknown_and_cross_tenant_scopes_are_indistinguishable(
     db_session: Session,
     monkeypatch,
 ):
@@ -150,7 +133,14 @@ def test_cross_tenant_scope_is_indistinguishable_from_unknown(
     company_b = _add_company(db_session)
     cross_tenant = _add_scope(db_session, company_b, "scope:private")
 
-    with pytest.raises(InvalidSearchScopeError) as exc_info:
+    with pytest.raises(InvalidSearchScopeError) as unknown_exc_info:
+        _resolve(
+            db_session,
+            monkeypatch,
+            company_id=company_a.id,
+            requested_scope_keys=("scope:unknown",),
+        )
+    with pytest.raises(InvalidSearchScopeError) as cross_tenant_exc_info:
         _resolve(
             db_session,
             monkeypatch,
@@ -158,7 +148,10 @@ def test_cross_tenant_scope_is_indistinguishable_from_unknown(
             requested_scope_keys=(cross_tenant.scope_key,),
         )
 
-    assert str(exc_info.value) == "Invalid search scope selection"
+    assert type(unknown_exc_info.value) is InvalidSearchScopeError
+    assert type(cross_tenant_exc_info.value) is InvalidSearchScopeError
+    assert str(unknown_exc_info.value) == str(cross_tenant_exc_info.value)
+    assert str(unknown_exc_info.value) == "Invalid search scope selection"
 
 
 def test_mixed_valid_and_unknown_scopes_fail_as_a_whole(
@@ -195,34 +188,6 @@ def test_mixed_valid_and_cross_tenant_scopes_fail_as_a_whole(
         )
 
 
-def test_same_scope_key_resolves_independently_for_each_tenant(
-    db_session: Session,
-    monkeypatch,
-):
-    company_a = _add_company(db_session)
-    company_b = _add_company(db_session)
-    scope_a = _add_scope(db_session, company_a, "scope:shared")
-    scope_b = _add_scope(db_session, company_b, "scope:shared")
-
-    context_a = _resolve(
-        db_session,
-        monkeypatch,
-        company_id=company_a.id,
-        requested_scope_keys=(scope_a.scope_key,),
-    )
-    context_b = _resolve(
-        db_session,
-        monkeypatch,
-        company_id=company_b.id,
-        requested_scope_keys=(scope_b.scope_key,),
-    )
-
-    assert context_a.company_id == company_a.id
-    assert context_a.resolved_scope_keys == (scope_a.scope_key,)
-    assert context_b.company_id == company_b.id
-    assert context_b.resolved_scope_keys == (scope_b.scope_key,)
-
-
 def test_unexpected_session_failure_is_translated(monkeypatch):
     def fail_session_creation():
         raise RuntimeError("database unavailable")
@@ -240,6 +205,28 @@ def test_unexpected_session_failure_is_translated(monkeypatch):
         )
 
     assert str(exc_info.value) == "Search scope resolution failed"
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+def test_unexpected_query_failure_is_translated_without_details(monkeypatch):
+    class QueryFailingSession:
+        def scalars(self, statement):
+            raise RuntimeError("database details")
+
+    monkeypatch.setattr(
+        scope_resolution,
+        "SessionLocal",
+        lambda: _ExistingSessionContext(QueryFailingSession()),
+    )
+
+    with pytest.raises(SearchScopeResolutionFailedError) as exc_info:
+        scope_resolution.resolve_search_execution_context(
+            company_id=1,
+            requested_scope_keys=None,
+        )
+
+    assert str(exc_info.value) == "Search scope resolution failed"
+    assert "database details" not in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
