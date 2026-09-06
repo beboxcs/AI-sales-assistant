@@ -15,6 +15,7 @@ from app.search.exceptions import (
     InvalidSearchScopeError,
     SearchExecutionError,
     SearchExecutionFailedError,
+    SearchScopeResolutionFailedError,
 )
 
 
@@ -121,5 +122,6 @@ def test_candidates_use_shared_domain_enums_with_preserved_values():
 
 def test_search_exception_inheritance():
     assert issubclass(InvalidSearchScopeError, SearchExecutionError)
+    assert issubclass(SearchScopeResolutionFailedError, SearchExecutionError)
     assert issubclass(SearchExecutionFailedError, SearchExecutionError)
     assert issubclass(SearchExecutionError, Exception)
