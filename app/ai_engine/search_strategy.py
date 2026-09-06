@@ -99,6 +99,75 @@ DISCRETE_DELTA_FIELDS: frozenset[SearchField] = frozenset(
 )
 
 
+_DEFAULT_HARD_FIELDS: frozenset[SearchField] = frozenset(
+    {
+        SearchField.LOCATION,
+        SearchField.PROPERTY_TYPE,
+        SearchField.PAYMENT_METHOD,
+    }
+)
+
+_DEFAULT_RELAXATION_RULES: dict[
+    SearchField, tuple[RelaxationDirection, float | None, float | None, int]
+] = {
+    SearchField.BEDROOMS: (RelaxationDirection.BOTH, 1, None, 10),
+    SearchField.BATHROOMS: (RelaxationDirection.BOTH, 1, None, 10),
+    SearchField.MIN_AREA_SQM: (RelaxationDirection.DECREASE, None, 10, 20),
+    SearchField.MAX_AREA_SQM: (RelaxationDirection.INCREASE, None, 10, 20),
+    SearchField.MIN_INSTALLMENT_YEARS: (
+        RelaxationDirection.DECREASE,
+        1,
+        None,
+        30,
+    ),
+    SearchField.MAX_DOWN_PAYMENT: (RelaxationDirection.INCREASE, None, 10, 40),
+    SearchField.MIN_PRICE: (RelaxationDirection.DECREASE, None, 10, 50),
+    SearchField.MAX_PRICE: (RelaxationDirection.INCREASE, None, 10, 50),
+}
+
+
+def build_default_search_strategy(filters: SearchFilters) -> "SearchStrategy":
+    """Build the canonical V1 strategy for structured search filters."""
+
+    constraints: list[SearchConstraint] = []
+    relaxation_rules: list[RelaxationRule] = []
+
+    for field in SearchField:
+        if getattr(filters, field.value) is None:
+            continue
+
+        strength = (
+            ConstraintStrength.HARD
+            if field in _DEFAULT_HARD_FIELDS
+            else ConstraintStrength.SOFT
+        )
+        constraints.append(SearchConstraint(field=field, strength=strength))
+
+        rule_config = _DEFAULT_RELAXATION_RULES.get(field)
+        if strength is not ConstraintStrength.SOFT or rule_config is None:
+            continue
+
+        direction, max_delta, max_percentage, priority = rule_config
+        relaxation_rules.append(
+            RelaxationRule(
+                field=field,
+                direction=direction,
+                max_delta=max_delta,
+                max_percentage=max_percentage,
+                priority=priority,
+            )
+        )
+
+    return SearchStrategy(
+        filters=filters.model_copy(deep=True),
+        constraints=constraints,
+        match_mode=MatchMode.NEAR if relaxation_rules else MatchMode.EXACT,
+        relaxation_rules=relaxation_rules,
+        alternative_drop_rules=[],
+        ranking_preferences=[],
+    )
+
+
 class SearchStrategy(BaseModel):
     filters: SearchFilters
     constraints: list[SearchConstraint] = Field(default_factory=list)
