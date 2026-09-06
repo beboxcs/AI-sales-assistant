@@ -22,6 +22,7 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/real_estate_db
+      - DEV_COMPANY_ID=1
     depends_on:
       - db
 
