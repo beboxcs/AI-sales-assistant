@@ -3,10 +3,12 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai_engine.change_detector import InventoryChange
 from app.ai_engine.schemas import InventorySnapshot, PaymentPlanSchema, UnitSchema
+from app.database import SessionLocal, engine as database_engine
 from app.models import (
     Compound,
     InventoryScope,
@@ -18,7 +20,11 @@ from app.models import (
 )
 
 
-class InventoryPersistenceError(Exception):
+class InventoryBackendError(Exception):
+    """Base class for errors exposed by backend inventory boundaries."""
+
+
+class InventoryPersistenceError(InventoryBackendError):
     """Base class for inventory persistence failures."""
 
 
@@ -42,6 +48,14 @@ class InventoryPersistenceFailedError(InventoryPersistenceError):
     """Raised when an unexpected error prevents atomic snapshot persistence."""
 
 
+class InventorySnapshotLoadError(InventoryBackendError):
+    """Raised when the current snapshot cannot be loaded safely."""
+
+
+class InventoryPersistenceConflictError(InventoryBackendError):
+    """Raised when persisted data conflicts with an ingestion operation."""
+
+
 def get_inventory_scope(
     session: Session,
     *,
@@ -56,11 +70,195 @@ def get_inventory_scope(
     inventory_scope = session.scalar(statement)
 
     if inventory_scope is None:
-        raise InventoryScopeNotFoundError(
-            f"Inventory scope {scope_key!r} was not found for company {company_id}"
-        )
+        raise InventoryScopeNotFoundError("Inventory scope was not found")
 
     return inventory_scope
+
+
+def load_current_inventory_snapshot(
+    *,
+    company_id: int,
+    scope_key: str,
+) -> InventorySnapshot:
+    """Load the currently present inventory for one tenant-owned scope."""
+    try:
+        with SessionLocal() as session:
+            return _load_current_inventory_snapshot(
+                session,
+                company_id=company_id,
+                scope_key=scope_key,
+            )
+    except InventoryScopeNotFoundError:
+        raise
+    except Exception as exc:
+        raise InventorySnapshotLoadError(
+            "Inventory snapshot load failed"
+        ) from exc
+
+
+def _load_current_inventory_snapshot(
+    session: Session,
+    *,
+    company_id: int,
+    scope_key: str,
+) -> InventorySnapshot:
+    inventory_scope = get_inventory_scope(
+        session,
+        company_id=company_id,
+        scope_key=scope_key,
+    )
+    unit_statement = (
+        select(Unit, Compound)
+        .join(
+            Compound,
+            (Compound.company_id == Unit.company_id)
+            & (Compound.id == Unit.compound_id),
+        )
+        .join(
+            UnitInventoryState,
+            (UnitInventoryState.company_id == Unit.company_id)
+            & (UnitInventoryState.unit_id == Unit.id),
+        )
+        .where(
+            Unit.company_id == company_id,
+            Compound.company_id == company_id,
+            UnitInventoryState.company_id == company_id,
+            UnitInventoryState.inventory_scope_id == inventory_scope.id,
+            UnitInventoryState.is_present_in_latest_inventory.is_(True),
+        )
+        .order_by(Compound.compound_key, Unit.external_unit_id, Unit.id)
+    )
+    unit_rows = session.execute(unit_statement).all()
+
+    plans_by_unit_id: dict[int, list[PaymentPlanSchema]] = {}
+    unit_ids = tuple(unit.id for unit, _compound in unit_rows)
+    if unit_ids:
+        plan_statement = (
+            select(PaymentPlan)
+            .join(
+                PaymentPlanInventoryState,
+                (
+                    PaymentPlanInventoryState.company_id
+                    == PaymentPlan.company_id
+                )
+                & (
+                    PaymentPlanInventoryState.payment_plan_id
+                    == PaymentPlan.id
+                ),
+            )
+            .where(
+                PaymentPlan.company_id == company_id,
+                PaymentPlan.unit_id.in_(unit_ids),
+                PaymentPlanInventoryState.company_id == company_id,
+                PaymentPlanInventoryState.inventory_scope_id
+                == inventory_scope.id,
+                PaymentPlanInventoryState.is_present_in_latest_inventory.is_(
+                    True
+                ),
+            )
+            .order_by(
+                PaymentPlan.unit_id,
+                PaymentPlan.plan_key,
+                PaymentPlan.id,
+            )
+        )
+        for payment_plan in session.scalars(plan_statement):
+            plans_by_unit_id.setdefault(payment_plan.unit_id, []).append(
+                _to_payment_plan_schema(payment_plan)
+            )
+
+    units = [
+        UnitSchema(
+            external_unit_id=unit.external_unit_id,
+            compound_key=compound.compound_key,
+            compound_name=compound.name,
+            location=compound.location,
+            property_type=unit.property_type,
+            base_price=unit.base_price,
+            base_currency=unit.base_currency,
+            status=unit.status,
+            bedrooms=unit.bedrooms,
+            bathrooms=unit.bathrooms,
+            area_sqm=unit.area_sqm,
+            delivery_date=unit.delivery_date,
+            payment_plans=plans_by_unit_id.get(unit.id, []),
+            source=inventory_scope.source_identifier,
+            last_updated=unit.source_last_updated,
+        )
+        for unit, compound in unit_rows
+    ]
+    return InventorySnapshot(scope_key=inventory_scope.scope_key, units=units)
+
+
+def _to_payment_plan_schema(payment_plan: PaymentPlan) -> PaymentPlanSchema:
+    return PaymentPlanSchema(
+        plan_key=payment_plan.plan_key,
+        source_plan_id=payment_plan.source_plan_id,
+        plan_name=payment_plan.plan_name,
+        payment_method=payment_plan.payment_method,
+        down_payment=payment_plan.down_payment,
+        installment_years=payment_plan.installment_years,
+        total_price=payment_plan.total_price,
+        currency=payment_plan.currency,
+    )
+
+
+def persist_inventory_ingestion(
+    *,
+    company_id: int,
+    snapshot: InventorySnapshot,
+    changes: list[InventoryChange],
+) -> None:
+    """Persist one ingestion with an internally owned atomic transaction."""
+    try:
+        with database_engine.begin() as connection:
+            with SessionLocal(
+                bind=connection,
+                join_transaction_mode="rollback_only",
+            ) as session:
+                persist_inventory_snapshot(
+                    session,
+                    company_id=company_id,
+                    snapshot=snapshot,
+                    changes=changes,
+                )
+    except InventoryScopeNotFoundError:
+        raise
+    except (
+        CompoundNotFoundError,
+        CompoundDescriptionMismatchError,
+        InventoryUnitNotFoundError,
+    ) as exc:
+        raise InventoryPersistenceConflictError(
+            "Inventory persistence conflict"
+        ) from exc
+    except InventoryPersistenceFailedError as exc:
+        if _exception_chain_contains_integrity_error(exc):
+            raise InventoryPersistenceConflictError(
+                "Inventory persistence conflict"
+            ) from exc
+        raise InventoryPersistenceFailedError(
+            "Inventory persistence failed"
+        ) from exc
+    except IntegrityError as exc:
+        raise InventoryPersistenceConflictError(
+            "Inventory persistence conflict"
+        ) from exc
+    except Exception as exc:
+        raise InventoryPersistenceFailedError(
+            "Inventory persistence failed"
+        ) from exc
+
+
+def _exception_chain_contains_integrity_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        if isinstance(current, IntegrityError):
+            return True
+        visited.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def get_compound(
