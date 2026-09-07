@@ -121,6 +121,15 @@ def test_detect_inventory_changes_ignores_metadata_only_updates():
     assert changes == []
 
 
+def test_detect_inventory_changes_ignores_source_only_scope_to_upload_difference():
+    changes = detect_inventory_changes(
+        _snapshot(units=[_unit(source="scope-source")]),
+        _snapshot(units=[_unit(source="inventory.xlsx")]),
+    )
+
+    assert changes == []
+
+
 def test_detect_inventory_changes_reports_payment_plan_added():
     changes = detect_inventory_changes(
         _snapshot(units=[_unit(payment_plans=[_plan(plan_key="terms:cash")])]),

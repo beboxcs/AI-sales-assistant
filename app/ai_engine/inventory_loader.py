@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
@@ -105,6 +106,17 @@ PAYMENT_PLAN_FIELDS: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class _InventoryLoadResult:
+    total_rows: int
+    valid_units: list[UnitSchema]
+    errors: list[dict[str, Any]]
+
+
+class InventoryStructureError(ValueError):
+    """Raised when inventory file structure cannot be read or mapped safely."""
+
+
 def load_inventory(file_path: str | Path) -> pd.DataFrame:
     path = Path(file_path)
     extension = path.suffix.lower()
@@ -112,7 +124,12 @@ def load_inventory(file_path: str | Path) -> pd.DataFrame:
     if extension == ".csv":
         return pd.read_csv(path)
     if extension == ".xlsx":
-        return pd.read_excel(path)
+        try:
+            return pd.read_excel(path)
+        except ValueError as exc:
+            raise InventoryStructureError(
+                "Inventory file structure could not be read"
+            ) from exc
 
     raise ValueError(f"Unsupported inventory file type: {extension}")
 
@@ -459,11 +476,28 @@ def validate_inventory(
 
 
 def process_inventory(file_path: str | Path) -> tuple[list[UnitSchema], list[dict[str, Any]]]:
+    result = _prepare_inventory_units(file_path)
+    return result.valid_units, result.errors
+
+
+def _prepare_inventory_units(
+    file_path: str | Path,
+    *,
+    source_name: str | None = None,
+) -> _InventoryLoadResult:
     path = Path(file_path)
     df = load_inventory(path)
     normalized_df = normalize_column_names(df)
     mapped_df = map_column_aliases(normalized_df)
-    return validate_inventory(mapped_df, source_name=path.name)
+    valid_units, errors = validate_inventory(
+        mapped_df,
+        source_name=source_name or path.name,
+    )
+    return _InventoryLoadResult(
+        total_rows=len(df),
+        valid_units=valid_units,
+        errors=errors,
+    )
 
 
 def _raise_for_column_collisions(
@@ -488,7 +522,7 @@ def _raise_for_column_collisions(
         f"{originals} -> {target}"
         for target, originals in collisions.items()
     ]
-    raise ValueError(
+    raise InventoryStructureError(
         "Column alias collision detected: "
         + "; ".join(collision_details)
     )
