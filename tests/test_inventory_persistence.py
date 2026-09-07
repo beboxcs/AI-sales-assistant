@@ -185,11 +185,7 @@ def test_persistence_rejects_compound_description_conflicts_atomically(
             changes=[],
         )
 
-    assert db_session.scalar(
-        select(func.count())
-        .select_from(Unit)
-        .where(Unit.company_id == context.company.id)
-    ) == 0
+    assert db_session.scalar(select(func.count()).select_from(Unit)) == 0
 
 
 def test_persistence_inserts_unit_plan_presence_history_and_decimals(
@@ -221,49 +217,19 @@ def test_persistence_inserts_unit_plan_presence_history_and_decimals(
         changes=changes,
     )
 
-    unit = get_unit_by_identity(
-        db_session,
-        company_id=context.company.id,
-        compound_id=context.compound.id,
-        external_unit_id=unit_data.external_unit_id,
-    )
-    assert unit is not None
-    payment_plan = db_session.scalar(
-        select(PaymentPlan).where(
-            PaymentPlan.company_id == context.company.id,
-            PaymentPlan.unit_id == unit.id,
-            PaymentPlan.plan_key == plan_data.plan_key,
-        )
-    )
-    unit_state = db_session.scalar(
-        select(UnitInventoryState).where(
-            UnitInventoryState.company_id == context.company.id,
-            UnitInventoryState.unit_id == unit.id,
-            UnitInventoryState.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
-    assert payment_plan is not None
-    plan_state = db_session.scalar(
-        select(PaymentPlanInventoryState).where(
-            PaymentPlanInventoryState.company_id == context.company.id,
-            PaymentPlanInventoryState.payment_plan_id == payment_plan.id,
-            PaymentPlanInventoryState.inventory_scope_id
-            == context.inventory_scope.id,
-        )
-    )
-    history = db_session.scalar(
-        select(UnitHistory).where(
-            UnitHistory.company_id == context.company.id,
-            UnitHistory.unit_id == unit.id,
-            UnitHistory.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
+    unit = db_session.scalar(select(Unit))
+    payment_plan = db_session.scalar(select(PaymentPlan))
+    unit_state = db_session.scalar(select(UnitInventoryState))
+    plan_state = db_session.scalar(select(PaymentPlanInventoryState))
+    history = db_session.scalar(select(UnitHistory))
 
+    assert unit is not None
     assert unit.compound_id == context.compound.id
     assert unit.base_price == Decimal("5800000.75")
     assert unit.area_sqm == Decimal("145.25")
     assert unit.source_last_updated == date(2026, 9, 5)
     assert not hasattr(unit, "source")
+    assert payment_plan is not None
     assert payment_plan.down_payment == Decimal("550000.25")
     assert payment_plan.installment_years == Decimal("7.50")
     assert payment_plan.total_price is None
@@ -321,30 +287,11 @@ def test_persistence_updates_unit_and_plan_without_duplicates(
         changes=detect_inventory_changes(previous, current),
     )
 
-    unit = get_unit_by_identity(
-        db_session,
-        company_id=context.company.id,
-        compound_id=context.compound.id,
-        external_unit_id="A101",
-    )
+    unit = db_session.scalar(select(Unit))
+    payment_plan = db_session.scalar(select(PaymentPlan))
+    assert db_session.scalar(select(func.count()).select_from(Unit)) == 1
+    assert db_session.scalar(select(func.count()).select_from(PaymentPlan)) == 1
     assert unit is not None
-    payment_plan = db_session.scalar(
-        select(PaymentPlan).where(
-            PaymentPlan.company_id == context.company.id,
-            PaymentPlan.unit_id == unit.id,
-            PaymentPlan.plan_key == "plan:installment",
-        )
-    )
-    assert db_session.scalar(
-        select(func.count())
-        .select_from(Unit)
-        .where(Unit.company_id == context.company.id)
-    ) == 1
-    assert db_session.scalar(
-        select(func.count())
-        .select_from(PaymentPlan)
-        .where(PaymentPlan.company_id == context.company.id)
-    ) == 1
     assert unit.property_type == "Duplex"
     assert unit.base_price == Decimal("6100000.00")
     assert unit.status == "Hold"
@@ -491,39 +438,15 @@ def test_whole_unit_missing_marks_unit_and_all_plan_states_absent(
         changes=detect_inventory_changes(observed, missing),
     )
 
-    unit = get_unit_by_identity(
-        db_session,
-        company_id=context.company.id,
-        compound_id=context.compound.id,
-        external_unit_id="A101",
-    )
-    assert unit is not None
-    unit_state = db_session.scalar(
-        select(UnitInventoryState).where(
-            UnitInventoryState.company_id == context.company.id,
-            UnitInventoryState.unit_id == unit.id,
-            UnitInventoryState.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
-    plan_states = db_session.scalars(
-        select(PaymentPlanInventoryState).where(
-            PaymentPlanInventoryState.company_id == context.company.id,
-            PaymentPlanInventoryState.inventory_scope_id
-            == context.inventory_scope.id,
-        )
-    ).all()
-    history = db_session.scalar(
-        select(UnitHistory).where(
-            UnitHistory.company_id == context.company.id,
-            UnitHistory.unit_id == unit.id,
-            UnitHistory.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
+    unit_state = db_session.scalar(select(UnitInventoryState))
+    plan_states = db_session.scalars(select(PaymentPlanInventoryState)).all()
+    history = db_session.scalar(select(UnitHistory))
+    unit = db_session.scalar(select(Unit))
     assert unit_state is not None
     assert unit_state.is_present_in_latest_inventory is False
     assert len(plan_states) == 2
     assert all(state.is_present_in_latest_inventory is False for state in plan_states)
-    assert unit.status == "Available"
+    assert unit is not None and unit.status == "Available"
     assert history is not None and history.change_type == "missing"
     assert history.payment_plan_changes == []
 
@@ -567,33 +490,9 @@ def test_missing_plan_marks_only_that_plan_absent_while_unit_stays_present(
         changes=detect_inventory_changes(previous, current),
     )
 
-    unit = get_unit_by_identity(
-        db_session,
-        company_id=context.company.id,
-        compound_id=context.compound.id,
-        external_unit_id="A101",
-    )
-    assert unit is not None
-    unit_state = db_session.scalar(
-        select(UnitInventoryState).where(
-            UnitInventoryState.company_id == context.company.id,
-            UnitInventoryState.unit_id == unit.id,
-            UnitInventoryState.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
-    states_by_key = _plan_states_by_key(
-        db_session,
-        company_id=context.company.id,
-        unit_id=unit.id,
-        inventory_scope_id=context.inventory_scope.id,
-    )
-    history = db_session.scalar(
-        select(UnitHistory).where(
-            UnitHistory.company_id == context.company.id,
-            UnitHistory.unit_id == unit.id,
-            UnitHistory.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
+    unit_state = db_session.scalar(select(UnitInventoryState))
+    states_by_key = _plan_states_by_key(db_session)
+    history = db_session.scalar(select(UnitHistory))
     assert unit_state is not None
     assert unit_state.is_present_in_latest_inventory is True
     assert states_by_key["plan:present"].is_present_in_latest_inventory is True
@@ -617,20 +516,7 @@ def test_unit_and_plan_reappearance_restore_presence_and_last_seen(
         snapshot=observed,
         changes=[],
     )
-    unit = get_unit_by_identity(
-        db_session,
-        company_id=context.company.id,
-        compound_id=context.compound.id,
-        external_unit_id="A101",
-    )
-    assert unit is not None
-    first_seen = db_session.scalar(
-        select(UnitInventoryState.last_seen_at).where(
-            UnitInventoryState.company_id == context.company.id,
-            UnitInventoryState.unit_id == unit.id,
-            UnitInventoryState.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
+    first_seen = db_session.scalar(select(UnitInventoryState.last_seen_at))
     missing = _snapshot(context.inventory_scope, [])
     persist_inventory_snapshot(
         db_session,
@@ -646,20 +532,8 @@ def test_unit_and_plan_reappearance_restore_presence_and_last_seen(
         changes=[],
     )
 
-    unit_state = db_session.scalar(
-        select(UnitInventoryState).where(
-            UnitInventoryState.company_id == context.company.id,
-            UnitInventoryState.unit_id == unit.id,
-            UnitInventoryState.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
-    plan_state = db_session.scalar(
-        select(PaymentPlanInventoryState).where(
-            PaymentPlanInventoryState.company_id == context.company.id,
-            PaymentPlanInventoryState.inventory_scope_id
-            == context.inventory_scope.id,
-        )
-    )
+    unit_state = db_session.scalar(select(UnitInventoryState))
+    plan_state = db_session.scalar(select(PaymentPlanInventoryState))
     assert unit_state is not None and unit_state.is_present_in_latest_inventory is True
     assert plan_state is not None and plan_state.is_present_in_latest_inventory is True
     assert unit_state.last_seen_at == plan_state.last_seen_at
@@ -704,12 +578,7 @@ def test_history_uses_compound_key_identity_and_json_safe_decimal_values(
         changes=detect_inventory_changes(previous, current),
     )
 
-    history = db_session.scalar(
-        select(UnitHistory).where(
-            UnitHistory.company_id == context.company.id,
-            UnitHistory.inventory_scope_id == context.inventory_scope.id,
-        )
-    )
+    history = db_session.scalar(select(UnitHistory))
     assert history is not None
     assert history.unit_id == get_unit_by_identity(
         db_session,
@@ -748,16 +617,8 @@ def test_failure_after_unit_upsert_rolls_back_entire_operation(
             changes=invalid_change,
         )
 
-    assert db_session.scalar(
-        select(func.count())
-        .select_from(Unit)
-        .where(Unit.company_id == context.company.id)
-    ) == 0
-    assert db_session.scalar(
-        select(func.count())
-        .select_from(UnitInventoryState)
-        .where(UnitInventoryState.company_id == context.company.id)
-    ) == 0
+    assert db_session.scalar(select(func.count()).select_from(Unit)) == 0
+    assert db_session.scalar(select(func.count()).select_from(UnitInventoryState)) == 0
 
 
 def _add_scope(
@@ -873,23 +734,10 @@ def _plan_schema(**overrides) -> PaymentPlanSchema:
 
 def _plan_states_by_key(
     session: Session,
-    *,
-    company_id: int,
-    unit_id: int,
-    inventory_scope_id: int,
 ) -> dict[str, PaymentPlanInventoryState]:
-    statement = (
-        select(PaymentPlan, PaymentPlanInventoryState)
-        .join(
-            PaymentPlanInventoryState,
-            PaymentPlanInventoryState.payment_plan_id == PaymentPlan.id,
-        )
-        .where(
-            PaymentPlan.company_id == company_id,
-            PaymentPlan.unit_id == unit_id,
-            PaymentPlanInventoryState.company_id == company_id,
-            PaymentPlanInventoryState.inventory_scope_id == inventory_scope_id,
-        )
+    statement = select(PaymentPlan, PaymentPlanInventoryState).join(
+        PaymentPlanInventoryState,
+        PaymentPlanInventoryState.payment_plan_id == PaymentPlan.id,
     )
     return {
         payment_plan.plan_key: state
