@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.dependencies import get_trusted_company_id
+from app.config import settings
 from app.database import engine
 from app.dev import seed
 from app.models import (
@@ -61,7 +63,8 @@ def test_seed_creates_exact_acceptance_dataset(db_session: Session):
 
     assert counts == EXPECTED_COUNTS
     assert _database_counts(db_session, company.id) == EXPECTED_COUNTS
-    assert company.id == seed.DEVELOPMENT_COMPANY_ID
+    assert company.id == settings.DEV_COMPANY_ID
+    assert company.id == get_trusted_company_id()
     assert company.name == seed.DEVELOPMENT_COMPANY_NAME
     assert set(scopes) == {"scope-nc-main", "scope-zayed-main"}
     assert set(compounds) == {"palm-east", "zayed-heights"}
@@ -347,6 +350,40 @@ def test_seed_rerun_is_idempotent_reconciles_owned_rows_and_preserves_unrelated_
     assert db_session.get(Company, unrelated.id) is unrelated
 
 
+@pytest.mark.parametrize(
+    "stale_record_type",
+    [
+        "scope",
+        "compound",
+        "unit",
+        "payment_plan",
+        "unit_state",
+        "payment_plan_state",
+    ],
+)
+def test_seed_fails_closed_on_unexpected_development_tenant_rows(
+    db_session: Session,
+    stale_record_type: str,
+):
+    seed.seed_development_search_acceptance_data(db_session)
+    company = _seed_company(db_session)
+    units = _units_by_external_id(db_session, company.id)
+    units["A101"].base_price = Decimal("1")
+    _add_stale_development_tenant_row(
+        db_session,
+        company,
+        stale_record_type,
+    )
+
+    with pytest.raises(
+        seed.DevelopmentSeedConflictError,
+        match="Unexpected .* rows exist for development seed tenant",
+    ):
+        seed.seed_development_search_acceptance_data(db_session)
+
+    assert units["A101"].base_price == Decimal("1")
+
+
 def test_seed_isolates_overlapping_natural_keys_in_another_tenant(
     db_session: Session,
 ):
@@ -433,8 +470,8 @@ def test_seed_isolates_overlapping_natural_keys_in_another_tenant(
 
     assert first_counts == second_counts == EXPECTED_COUNTS
     assert _database_counts(db_session, seed_company.id) == EXPECTED_COUNTS
-    assert seed_company.id == seed.DEVELOPMENT_COMPANY_ID
-    assert seed_units["A101"].company_id == seed.DEVELOPMENT_COMPANY_ID
+    assert seed_company.id == settings.DEV_COMPANY_ID
+    assert seed_units["A101"].company_id == settings.DEV_COMPANY_ID
     assert seed_units["A101"].id != other_unit.id
     assert (
         other_compound.name,
@@ -459,7 +496,7 @@ def test_seed_rejects_same_company_name_under_wrong_id_without_descendants(
     wrong_id = _test_id()
     db_session.add(Company(id=wrong_id, name=company_name))
     db_session.flush()
-    monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_ID", company_id)
+    monkeypatch.setattr(seed.settings, "DEV_COMPANY_ID", company_id)
     monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_NAME", company_name)
 
     with pytest.raises(seed.DevelopmentSeedConflictError):
@@ -476,7 +513,7 @@ def test_seed_rejects_company_id_with_wrong_name_without_descendants(
     company_name = f"Development Search Acceptance V1 {uuid4().hex}"
     db_session.add(Company(id=company_id, name="Unrelated Company"))
     db_session.flush()
-    monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_ID", company_id)
+    monkeypatch.setattr(seed.settings, "DEV_COMPANY_ID", company_id)
     monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_NAME", company_name)
 
     with pytest.raises(seed.DevelopmentSeedConflictError):
@@ -499,7 +536,7 @@ def test_seed_rejects_split_company_id_and_name_collision(
         ]
     )
     db_session.flush()
-    monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_ID", company_id)
+    monkeypatch.setattr(seed.settings, "DEV_COMPANY_ID", company_id)
     monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_NAME", company_name)
 
     with pytest.raises(seed.DevelopmentSeedConflictError):
@@ -526,7 +563,7 @@ def test_run_seed_is_atomic_on_failure(monkeypatch):
             raise RuntimeError("simulated seed failure")
         return unit
 
-    monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_ID", company_id)
+    monkeypatch.setattr(seed.settings, "DEV_COMPANY_ID", company_id)
     monkeypatch.setattr(seed, "DEVELOPMENT_COMPANY_NAME", company_name)
     monkeypatch.setattr(seed, "SessionLocal", test_session_local)
     monkeypatch.setattr(seed, "_upsert_unit", fail_during_unit_seed)
@@ -711,6 +748,90 @@ def _assert_no_seed_descendants(
             .where(model.company_id.in_(company_ids))
         )
         assert count == 0
+
+
+def _add_stale_development_tenant_row(
+    session: Session,
+    company: Company,
+    stale_record_type: str,
+) -> None:
+    compounds = _compounds_by_key(session, company.id)
+    scopes = _scopes_by_key(session, company.id)
+    units = _units_by_external_id(session, company.id)
+    plans = _plans_by_key(session, company.id)
+
+    if stale_record_type == "scope":
+        session.add(
+            InventoryScope(
+                company_id=company.id,
+                compound_id=None,
+                scope_key="scope-stale",
+                source_identifier="development-search-acceptance-v1:stale",
+            )
+        )
+    elif stale_record_type == "compound":
+        session.add(
+            Compound(
+                company_id=company.id,
+                compound_key="compound-stale",
+                name="Stale Compound",
+                location="New Cairo",
+            )
+        )
+    elif stale_record_type == "unit":
+        session.add(
+            Unit(
+                company_id=company.id,
+                compound_id=compounds["palm-east"].id,
+                external_unit_id="STALE",
+                property_type="Villa",
+                bedrooms=1,
+                bathrooms=1,
+                area_sqm=Decimal("100"),
+                base_price=Decimal("1000000"),
+                base_currency="EGP",
+                status="Available",
+                delivery_date=None,
+                source_last_updated=seed.SEED_SOURCE_LAST_UPDATED,
+            )
+        )
+    elif stale_record_type == "payment_plan":
+        session.add(
+            PaymentPlan(
+                company_id=company.id,
+                unit_id=units["A101"].id,
+                plan_key="plan-stale",
+                source_plan_id=None,
+                plan_name=None,
+                payment_method="Cash",
+                total_price=Decimal("1000000"),
+                down_payment=None,
+                installment_years=None,
+                currency="EGP",
+            )
+        )
+    elif stale_record_type == "unit_state":
+        session.add(
+            UnitInventoryState(
+                company_id=company.id,
+                unit_id=units["A101"].id,
+                inventory_scope_id=scopes["scope-zayed-main"].id,
+                is_present_in_latest_inventory=False,
+            )
+        )
+    elif stale_record_type == "payment_plan_state":
+        session.add(
+            PaymentPlanInventoryState(
+                company_id=company.id,
+                payment_plan_id=plans["A101-cash"].id,
+                inventory_scope_id=scopes["scope-zayed-main"].id,
+                is_present_in_latest_inventory=False,
+            )
+        )
+    else:
+        raise AssertionError(f"Unsupported stale record type: {stale_record_type}")
+
+    session.flush()
 
 
 def _unit_values(unit: Unit):

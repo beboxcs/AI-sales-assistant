@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import SessionLocal
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
 from app.models import (
@@ -22,7 +23,6 @@ from app.models import (
     UnitInventoryState,
 )
 
-DEVELOPMENT_COMPANY_ID = -2_000_000_000
 DEVELOPMENT_COMPANY_NAME = "Development Search Acceptance V1"
 SEED_SOURCE_LAST_UPDATED = date(2026, 1, 1)
 SEED_LAST_SEEN_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -236,10 +236,36 @@ _UNITS = (
     ),
 )
 
+_EXPECTED_SCOPE_KEYS = frozenset(spec.scope_key for spec in _SCOPES)
+_EXPECTED_COMPOUND_KEYS = frozenset(spec.compound_key for spec in _COMPOUNDS)
+_EXPECTED_UNIT_IDENTITIES = frozenset(
+    (spec.compound_key, spec.external_unit_id) for spec in _UNITS
+)
+_EXPECTED_PLAN_IDENTITIES = frozenset(
+    (unit_spec.compound_key, unit_spec.external_unit_id, plan_spec.plan_key)
+    for unit_spec in _UNITS
+    for plan_spec in unit_spec.payment_plans
+)
+_EXPECTED_UNIT_STATE_IDENTITIES = frozenset(
+    (spec.compound_key, spec.external_unit_id, spec.scope_key)
+    for spec in _UNITS
+)
+_EXPECTED_PLAN_STATE_IDENTITIES = frozenset(
+    (
+        unit_spec.compound_key,
+        unit_spec.external_unit_id,
+        plan_spec.plan_key,
+        unit_spec.scope_key,
+    )
+    for unit_spec in _UNITS
+    for plan_spec in unit_spec.payment_plans
+)
+
 
 def seed_development_search_acceptance_data(session: Session) -> SeedCounts:
     """Reconcile seed-owned records without committing the caller's transaction."""
     company = _resolve_company(session)
+    _assert_no_unexpected_seed_tenant_rows(session, company.id)
 
     compounds = {
         spec.compound_key: _upsert_compound(session, company, spec)
@@ -313,7 +339,7 @@ def main() -> None:
 def _resolve_company(session: Session) -> Company:
     statement = select(Company).where(
         or_(
-            Company.id == DEVELOPMENT_COMPANY_ID,
+            Company.id == settings.DEV_COMPANY_ID,
             Company.name == DEVELOPMENT_COMPANY_NAME,
         )
     )
@@ -325,7 +351,7 @@ def _resolve_company(session: Session) -> Company:
     if matches:
         company = matches[0]
         if (
-            company.id != DEVELOPMENT_COMPANY_ID
+            company.id != settings.DEV_COMPANY_ID
             or company.name != DEVELOPMENT_COMPANY_NAME
         ):
             raise DevelopmentSeedConflictError(
@@ -334,12 +360,188 @@ def _resolve_company(session: Session) -> Company:
         return company
 
     company = Company(
-        id=DEVELOPMENT_COMPANY_ID,
+        id=settings.DEV_COMPANY_ID,
         name=DEVELOPMENT_COMPANY_NAME,
     )
     session.add(company)
     session.flush()
     return company
+
+
+def _assert_no_unexpected_seed_tenant_rows(
+    session: Session,
+    company_id: int,
+) -> None:
+    _reject_unexpected(
+        "inventory scope",
+        set(
+            session.scalars(
+                select(InventoryScope.scope_key).where(
+                    InventoryScope.company_id == company_id
+                )
+            )
+        ),
+        _EXPECTED_SCOPE_KEYS,
+    )
+    _reject_unexpected(
+        "compound",
+        set(
+            session.scalars(
+                select(Compound.compound_key).where(
+                    Compound.company_id == company_id
+                )
+            )
+        ),
+        _EXPECTED_COMPOUND_KEYS,
+    )
+    _reject_unexpected(
+        "unit",
+        {
+            tuple(row)
+            for row in session.execute(
+                select(Compound.compound_key, Unit.external_unit_id)
+                .select_from(Unit)
+                .join(
+                    Compound,
+                    and_(
+                        Compound.company_id == Unit.company_id,
+                        Compound.id == Unit.compound_id,
+                    ),
+                )
+                .where(Unit.company_id == company_id)
+            )
+        },
+        _EXPECTED_UNIT_IDENTITIES,
+    )
+    _reject_unexpected(
+        "payment plan",
+        {
+            tuple(row)
+            for row in session.execute(
+                select(
+                    Compound.compound_key,
+                    Unit.external_unit_id,
+                    PaymentPlan.plan_key,
+                )
+                .select_from(PaymentPlan)
+                .join(
+                    Unit,
+                    and_(
+                        Unit.company_id == PaymentPlan.company_id,
+                        Unit.id == PaymentPlan.unit_id,
+                    ),
+                )
+                .join(
+                    Compound,
+                    and_(
+                        Compound.company_id == Unit.company_id,
+                        Compound.id == Unit.compound_id,
+                    ),
+                )
+                .where(PaymentPlan.company_id == company_id)
+            )
+        },
+        _EXPECTED_PLAN_IDENTITIES,
+    )
+    _reject_unexpected(
+        "unit inventory state",
+        {
+            tuple(row)
+            for row in session.execute(
+                select(
+                    Compound.compound_key,
+                    Unit.external_unit_id,
+                    InventoryScope.scope_key,
+                )
+                .select_from(UnitInventoryState)
+                .join(
+                    Unit,
+                    and_(
+                        Unit.company_id == UnitInventoryState.company_id,
+                        Unit.id == UnitInventoryState.unit_id,
+                    ),
+                )
+                .join(
+                    Compound,
+                    and_(
+                        Compound.company_id == Unit.company_id,
+                        Compound.id == Unit.compound_id,
+                    ),
+                )
+                .join(
+                    InventoryScope,
+                    and_(
+                        InventoryScope.company_id
+                        == UnitInventoryState.company_id,
+                        InventoryScope.id
+                        == UnitInventoryState.inventory_scope_id,
+                    ),
+                )
+                .where(UnitInventoryState.company_id == company_id)
+            )
+        },
+        _EXPECTED_UNIT_STATE_IDENTITIES,
+    )
+    _reject_unexpected(
+        "payment-plan inventory state",
+        {
+            tuple(row)
+            for row in session.execute(
+                select(
+                    Compound.compound_key,
+                    Unit.external_unit_id,
+                    PaymentPlan.plan_key,
+                    InventoryScope.scope_key,
+                )
+                .select_from(PaymentPlanInventoryState)
+                .join(
+                    PaymentPlan,
+                    and_(
+                        PaymentPlan.company_id
+                        == PaymentPlanInventoryState.company_id,
+                        PaymentPlan.id
+                        == PaymentPlanInventoryState.payment_plan_id,
+                    ),
+                )
+                .join(
+                    Unit,
+                    and_(
+                        Unit.company_id == PaymentPlan.company_id,
+                        Unit.id == PaymentPlan.unit_id,
+                    ),
+                )
+                .join(
+                    Compound,
+                    and_(
+                        Compound.company_id == Unit.company_id,
+                        Compound.id == Unit.compound_id,
+                    ),
+                )
+                .join(
+                    InventoryScope,
+                    and_(
+                        InventoryScope.company_id
+                        == PaymentPlanInventoryState.company_id,
+                        InventoryScope.id
+                        == PaymentPlanInventoryState.inventory_scope_id,
+                    ),
+                )
+                .where(PaymentPlanInventoryState.company_id == company_id)
+            )
+        },
+        _EXPECTED_PLAN_STATE_IDENTITIES,
+    )
+
+
+def _reject_unexpected(
+    record_type: str,
+    actual_identities: set,
+    expected_identities: frozenset,
+) -> None:
+    if actual_identities - expected_identities:
+        raise DevelopmentSeedConflictError(
+            f"Unexpected {record_type} rows exist for development seed tenant"
+        )
 
 
 def _upsert_compound(
