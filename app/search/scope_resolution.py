@@ -42,11 +42,7 @@ def resolve_search_execution_context(
                     raise InvalidSearchScopeError(
                         "Invalid search scope selection"
                     )
-                resolved_scope_keys = tuple(
-                    scope_key
-                    for scope_key in requested_scope_keys
-                    if scope_key in resolved_keys
-                )
+                resolved_scope_keys = requested_scope_keys
 
         return SearchExecutionContext(
             company_id=company_id,
