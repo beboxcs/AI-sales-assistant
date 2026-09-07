@@ -13,6 +13,7 @@ from app.api.dependencies import (
     get_trusted_company_id,
 )
 from app.api.errors import APIError
+from app.domain.enums import PaymentMethod
 from app.search.exceptions import (
     InvalidSearchScopeError,
     SearchScopeResolutionFailedError,
@@ -32,7 +33,7 @@ class SearchRequest(BaseModel):
     max_price: float | None = Field(default=None, ge=0)
     min_area_sqm: float | None = Field(default=None, gt=0)
     max_area_sqm: float | None = Field(default=None, gt=0)
-    payment_method: str | None = None
+    payment_method: PaymentMethod | None = None
     max_down_payment: float | None = Field(default=None, ge=0)
     min_installment_years: float | None = Field(default=None, gt=0)
     requested_scope_keys: list[str] | None = Field(default=None, min_length=1)
@@ -59,7 +60,11 @@ class SearchRequest(BaseModel):
             max_price=self.max_price,
             min_area_sqm=self.min_area_sqm,
             max_area_sqm=self.max_area_sqm,
-            payment_method=self.payment_method,
+            payment_method=(
+                self.payment_method.value
+                if self.payment_method is not None
+                else None
+            ),
             max_down_payment=self.max_down_payment,
             min_installment_years=self.min_installment_years,
         )

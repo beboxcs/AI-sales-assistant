@@ -161,6 +161,32 @@ def test_request_dto_maps_explicitly_to_search_filters(client):
     )
 
 
+@pytest.mark.parametrize("payment_method", ["Cash", "Installment"])
+def test_payment_method_accepts_public_enum_values(client, payment_method):
+    test_client, calls, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        json={"payment_method": payment_method},
+    )
+
+    assert response.status_code == 200
+    filters, _ = calls["search"][0]
+    assert filters.payment_method == payment_method
+
+
+def test_payment_method_rejects_invalid_public_value(client):
+    test_client, _, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        json={"payment_method": "Mortgage"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "payment_method"]
+
+
 def test_company_id_cannot_be_supplied_in_request_body(client):
     test_client, _, _ = client
 
