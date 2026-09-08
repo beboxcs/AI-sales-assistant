@@ -222,6 +222,18 @@ def test_postgresql_constraints_and_tenant_relationships(
             },
         ),
         (
+            "ck_api_credentials_secret_hash_sha256_length",
+            {
+                "id": 37,
+                "key_id": "H" * 22,
+                "company_id": 1,
+                "secret_hash": bytes(33),
+                "name": "Long digest",
+                "is_active": True,
+                "revoked_at": None,
+            },
+        ),
+        (
             "fk_api_credentials_company",
             {
                 "id": 33,

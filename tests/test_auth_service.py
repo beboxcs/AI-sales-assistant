@@ -134,6 +134,26 @@ def test_wrong_secret_is_rejected_and_session_closes(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "credential",
+    [
+        StubCredential(is_active=False, revoked_at=NOW),
+        StubCredential(is_active=False),
+        StubCredential(expires_at=NOW - timedelta(microseconds=1)),
+    ],
+)
+def test_wrong_secret_does_not_expose_credential_state(monkeypatch, credential):
+    contexts = _install_backend(monkeypatch, credential)
+    wrong_secret_key = f"{API_KEY_PREFIX}{KEY_ID}.{'w' * 43}"
+
+    with pytest.raises(InvalidApiCredentialError) as exc_info:
+        auth_service.authenticate_api_key(wrong_secret_key, pepper=PEPPER)
+
+    assert type(exc_info.value) is InvalidApiCredentialError
+    assert str(exc_info.value) == "Invalid API credential"
+    assert contexts[0].closed is True
+
+
+@pytest.mark.parametrize(
     ("credential", "expected_error"),
     [
         (StubCredential(is_active=False), InvalidApiCredentialError),
