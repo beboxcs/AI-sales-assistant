@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
@@ -46,6 +47,66 @@ class Company(Base):
     inventory_scopes: Mapped[list[InventoryScope]] = relationship(
         back_populates="company", foreign_keys="InventoryScope.company_id"
     )
+    api_credentials: Mapped[list[ApiCredential]] = relationship(
+        back_populates="company"
+    )
+
+
+class ApiCredential(Base):
+    __tablename__ = "api_credentials"
+    __table_args__ = (
+        UniqueConstraint("key_id", name="uq_api_credentials_key_id"),
+        CheckConstraint(
+            "octet_length(secret_hash) = 32",
+            name="ck_api_credentials_secret_hash_sha256_length",
+        ),
+        CheckConstraint(
+            "key_id ~ '[^[:space:]]'",
+            name="ck_api_credentials_key_id_not_blank",
+        ),
+        CheckConstraint(
+            "name ~ '[^[:space:]]'",
+            name="ck_api_credentials_name_not_blank",
+        ),
+        CheckConstraint(
+            "revoked_at IS NULL OR is_active = false",
+            name="ck_api_credentials_revoked_inactive",
+        ),
+        Index("ix_api_credentials_company_id", "company_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "companies.id",
+            name="fk_api_credentials_company",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    secret_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    company: Mapped[Company] = relationship(back_populates="api_credentials")
 
 
 class Compound(Base):
