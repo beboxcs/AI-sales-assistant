@@ -5,12 +5,12 @@ from typing import NamedTuple
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai_engine.change_detector import detect_inventory_changes
 from app.ai_engine.schemas import InventorySnapshot, PaymentPlanSchema, UnitSchema
-from app.database import Base, engine as database_engine
+from app.database import engine as database_engine
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
 from app.models import (
     Company,
@@ -41,20 +41,6 @@ class PersistenceContext(NamedTuple):
 
 
 @pytest.fixture
-def inventory_session() -> Generator[Session, None, None]:
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(
-        engine,
-        tables=[Company.__table__, Compound.__table__, InventoryScope.__table__],
-    )
-
-    with Session(engine) as session:
-        yield session
-
-    engine.dispose()
-
-
-@pytest.fixture
 def db_session() -> Generator[Session, None, None]:
     assert database_engine.dialect.name == "postgresql"
 
@@ -76,18 +62,19 @@ def db_session() -> Generator[Session, None, None]:
 
 
 def test_get_inventory_scope_returns_scope_for_correct_company(
-    inventory_session: Session,
+    db_session: Session,
 ):
+    company_id = _test_id()
     expected_scope = _add_scope(
-        inventory_session,
-        company_id=1,
-        scope_id=101,
+        db_session,
+        company_id=company_id,
+        scope_id=_test_id(),
         scope_key="feed:primary",
     )
 
     actual_scope = get_inventory_scope(
-        inventory_session,
-        company_id=1,
+        db_session,
+        company_id=company_id,
         scope_key="feed:primary",
     )
 
@@ -95,34 +82,37 @@ def test_get_inventory_scope_returns_scope_for_correct_company(
 
 
 def test_get_inventory_scope_rejects_nonexistent_scope(
-    inventory_session: Session,
+    db_session: Session,
 ):
-    inventory_session.add(Company(id=1, name="Company 1"))
-    inventory_session.flush()
+    company_id = _test_id()
+    db_session.add(Company(id=company_id, name=f"Company {company_id}"))
+    db_session.flush()
 
     with pytest.raises(InventoryScopeNotFoundError):
         get_inventory_scope(
-            inventory_session,
-            company_id=1,
+            db_session,
+            company_id=company_id,
             scope_key="feed:missing",
         )
 
 
 def test_get_inventory_scope_rejects_matching_scope_from_another_company(
-    inventory_session: Session,
+    db_session: Session,
 ):
-    inventory_session.add(Company(id=1, name="Company 1"))
+    company_id = _test_id()
+    other_company_id = _test_id()
+    db_session.add(Company(id=company_id, name=f"Company {company_id}"))
     _add_scope(
-        inventory_session,
-        company_id=2,
-        scope_id=202,
+        db_session,
+        company_id=other_company_id,
+        scope_id=_test_id(),
         scope_key="feed:shared",
     )
 
     with pytest.raises(InventoryScopeNotFoundError):
         get_inventory_scope(
-            inventory_session,
-            company_id=1,
+            db_session,
+            company_id=company_id,
             scope_key="feed:shared",
         )
 
