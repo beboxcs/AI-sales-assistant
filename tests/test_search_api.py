@@ -123,24 +123,41 @@ def test_valid_structured_search_request(client):
     }
 
 
+def test_json_content_type_with_charset_accepts_numeric_request_body(client):
+    test_client, calls, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        content='{"min_price": 100}',
+        headers={"content-type": "application/json; charset=utf-8"},
+    )
+
+    assert response.status_code == 200
+    filters, _ = calls["search"][0]
+    assert filters.min_price == Decimal("100")
+
+
 def test_request_dto_maps_explicitly_to_search_filters(client):
     test_client, calls, _ = client
 
     response = test_client.post(
         "/api/v1/search",
-        json={
-            "location": "Sheikh Zayed",
-            "property_type": "Villa",
-            "bedrooms": 4,
-            "bathrooms": 3,
-            "min_price": 2500000,
-            "max_price": 9000000,
-            "min_area_sqm": 200,
-            "max_area_sqm": 350,
-            "payment_method": "Cash",
-            "max_down_payment": 1000000,
-            "min_installment_years": 5,
-        },
+        content="""
+        {
+          "location": "Sheikh Zayed",
+          "property_type": "Villa",
+          "bedrooms": 4,
+          "bathrooms": 3,
+          "min_price": 1234567890123456.78,
+          "max_price": 9000000.75,
+          "min_area_sqm": 200.5,
+          "max_area_sqm": 350.25,
+          "payment_method": "Cash",
+          "max_down_payment": 1000000.5,
+          "min_installment_years": 5.5
+        }
+        """,
+        headers={"content-type": "application/json"},
     )
 
     assert response.status_code == 200
@@ -151,13 +168,24 @@ def test_request_dto_maps_explicitly_to_search_filters(client):
         property_type="Villa",
         bedrooms=4,
         bathrooms=3,
-        min_price=2500000,
-        max_price=9000000,
-        min_area_sqm=200,
-        max_area_sqm=350,
+        min_price=Decimal("1234567890123456.78"),
+        max_price=Decimal("9000000.75"),
+        min_area_sqm=Decimal("200.5"),
+        max_area_sqm=Decimal("350.25"),
         payment_method="Cash",
-        max_down_payment=1000000,
-        min_installment_years=5,
+        max_down_payment=Decimal("1000000.5"),
+        min_installment_years=Decimal("5.5"),
+    )
+    assert all(
+        isinstance(value, Decimal)
+        for value in (
+            filters.min_price,
+            filters.max_price,
+            filters.min_area_sqm,
+            filters.max_area_sqm,
+            filters.max_down_payment,
+            filters.min_installment_years,
+        )
     )
 
 
@@ -187,12 +215,63 @@ def test_payment_method_rejects_invalid_public_value(client):
     assert response.json()["detail"][0]["loc"] == ["body", "payment_method"]
 
 
+def test_malformed_json_returns_client_error(client):
+    test_client, calls, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        content='{"min_price": 100',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert calls["search"] == []
+
+
+def test_invalid_json_encoding_returns_client_error(client):
+    test_client, calls, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        content=b"\xff",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert calls["search"] == []
+
+
+def test_text_plain_json_body_is_rejected_without_search(client):
+    test_client, calls, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        content='{"min_price": 100}',
+        headers={"content-type": "text/plain"},
+    )
+
+    assert response.status_code == 422
+    assert calls["search"] == []
+
+
 def test_company_id_cannot_be_supplied_in_request_body(client):
-    test_client, _, _ = client
+    test_client, calls, _ = client
 
     response = test_client.post("/api/v1/search", json={"company_id": 999})
 
     assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "company_id"]
+    assert calls["search"] == []
+
+
+def test_invalid_numeric_bounds_are_rejected(client):
+    test_client, calls, _ = client
+
+    response = test_client.post("/api/v1/search", json={"max_price": -1})
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "max_price"]
+    assert calls["search"] == []
 
 
 def test_requested_scope_keys_omitted_resolves_as_none(client):
@@ -402,6 +481,16 @@ def test_decimal_date_and_enum_fields_serialize_correctly(client):
     assert result["unit"]["payment_plans"][0]["total_price"] == "4700000.25"
 
 
+def test_explanation_baseline_decimal_values_keep_numeric_response_shape(client):
+    test_client, _, _ = client
+
+    response = test_client.post("/api/v1/search", json={})
+
+    assert response.status_code == 200
+    tradeoff = response.json()["results"][0]["explanation"]["tradeoffs"][0]
+    assert tradeoff["baseline_value"] == [None, 4500000.0]
+
+
 def test_internal_failure_produces_safe_500_without_leaking_exception_text(client, monkeypatch):
     test_client, _, _ = client
 
@@ -432,6 +521,18 @@ def test_request_body_does_not_accept_resolved_scope_keys(client):
     )
 
     assert response.status_code == 422
+
+
+def test_openapi_documents_search_request_body(client):
+    test_client, _, _ = client
+
+    schema = test_client.get("/openapi.json").json()["paths"]["/api/v1/search"][
+        "post"
+    ]["requestBody"]["content"]["application/json"]["schema"]
+
+    assert schema["title"] == "SearchRequest"
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["min_price"]["anyOf"][0]["type"] == "number"
 
 
 def test_no_sqlalchemy_or_session_use_exists_in_api_route():

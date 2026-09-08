@@ -1,9 +1,11 @@
 from datetime import date
 from decimal import Decimal
+from json import JSONDecodeError, loads
 from typing import Any
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi import APIRouter, Depends, Request
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.ai_engine import search_application
 from app.ai_engine.search_filters import SearchFilters
@@ -29,13 +31,13 @@ class SearchRequest(BaseModel):
     property_type: str | None = None
     bedrooms: int | None = Field(default=None, ge=0)
     bathrooms: int | None = Field(default=None, ge=0)
-    min_price: float | None = Field(default=None, ge=0)
-    max_price: float | None = Field(default=None, ge=0)
-    min_area_sqm: float | None = Field(default=None, gt=0)
-    max_area_sqm: float | None = Field(default=None, gt=0)
+    min_price: Decimal | None = Field(default=None, ge=0)
+    max_price: Decimal | None = Field(default=None, ge=0)
+    min_area_sqm: Decimal | None = Field(default=None, gt=0)
+    max_area_sqm: Decimal | None = Field(default=None, gt=0)
     payment_method: PaymentMethod | None = None
-    max_down_payment: float | None = Field(default=None, ge=0)
-    min_installment_years: float | None = Field(default=None, gt=0)
+    max_down_payment: Decimal | None = Field(default=None, ge=0)
+    min_installment_years: Decimal | None = Field(default=None, gt=0)
     requested_scope_keys: list[str] | None = Field(default=None, min_length=1)
 
     @field_validator("requested_scope_keys")
@@ -135,9 +137,77 @@ class SearchResponse(BaseModel):
     results: list[SearchResultResponse]
 
 
-@router.post("/search", response_model=SearchResponse)
+_SEARCH_REQUEST_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": SearchRequest.model_json_schema(),
+            }
+        },
+    }
+}
+
+
+async def _parse_search_request(
+    raw_request: Request,
+) -> SearchRequest:
+    if not _is_json_content_type(raw_request.headers.get("content-type")):
+        raise RequestValidationError(
+            [
+                {
+                    "type": "model_attributes_type",
+                    "loc": ("body",),
+                    "msg": "Input should be a valid dictionary or object to extract fields from",
+                    "input": None,
+                }
+            ]
+        )
+
+    raw_body = await raw_request.body()
+    try:
+        request_payload = loads(raw_body, parse_float=Decimal)
+    except (JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "json_invalid",
+                    "loc": ("body",),
+                    "msg": "Invalid JSON",
+                    "input": None,
+                }
+            ]
+        ) from exc
+
+    try:
+        return SearchRequest.model_validate(request_payload)
+    except ValidationError as exc:
+        raise RequestValidationError(_body_validation_errors(exc)) from exc
+
+
+def _is_json_content_type(content_type: str | None) -> bool:
+    if content_type is None:
+        return False
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def _body_validation_errors(exc: ValidationError) -> list[dict[str, Any]]:
+    errors = []
+    for validation_error in exc.errors():
+        error_detail = dict(validation_error)
+        error_detail["loc"] = ("body", *validation_error["loc"])
+        errors.append(error_detail)
+    return errors
+
+
+@router.post(
+    "/search",
+    response_model=SearchResponse,
+    openapi_extra=_SEARCH_REQUEST_OPENAPI,
+)
 def search_units(
-    request: SearchRequest,
+    request: SearchRequest = Depends(_parse_search_request),
     company_id: int = Depends(get_trusted_company_id),
     resolve_context: SearchContextResolver = Depends(get_search_context_resolver),
 ) -> SearchResponse:
@@ -241,10 +311,26 @@ def _project_explanation_fact(fact) -> ExplanationFactResponse:
         dimension=_public_value(fact.dimension),
         kind=_public_value(fact.kind),
         message_key=fact.message_key,
-        baseline_value=fact.baseline_value,
+        baseline_value=_project_explanation_baseline_value(fact.baseline_value),
         candidate_value=fact.candidate_value,
         score=fact.score,
     )
+
+
+def _project_explanation_baseline_value(baseline_value):
+    if isinstance(baseline_value, Decimal):
+        return float(baseline_value)
+    if isinstance(baseline_value, tuple):
+        return tuple(
+            _project_explanation_baseline_value(item_baseline)
+            for item_baseline in baseline_value
+        )
+    if isinstance(baseline_value, list):
+        return [
+            _project_explanation_baseline_value(item_baseline)
+            for item_baseline in baseline_value
+        ]
+    return _public_value(baseline_value)
 
 
 def _public_value(value):

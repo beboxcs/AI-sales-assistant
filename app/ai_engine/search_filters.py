@@ -1,7 +1,7 @@
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.ai_engine.inventory_loader import normalize_money
 
@@ -11,13 +11,35 @@ class SearchFilters(BaseModel):
     property_type: str | None = None
     bedrooms: int | None = Field(default=None, ge=0)
     bathrooms: int | None = Field(default=None, ge=0)
-    min_price: float | None = Field(default=None, ge=0)
-    max_price: float | None = Field(default=None, ge=0)
-    min_area_sqm: float | None = Field(default=None, gt=0)
-    max_area_sqm: float | None = Field(default=None, gt=0)
+    min_price: Decimal | None = Field(default=None, ge=0)
+    max_price: Decimal | None = Field(default=None, ge=0)
+    min_area_sqm: Decimal | None = Field(default=None, gt=0)
+    max_area_sqm: Decimal | None = Field(default=None, gt=0)
     payment_method: str | None = None
-    max_down_payment: float | None = Field(default=None, ge=0)
-    min_installment_years: float | None = Field(default=None, gt=0)
+    max_down_payment: Decimal | None = Field(default=None, ge=0)
+    min_installment_years: Decimal | None = Field(default=None, gt=0)
+
+    @field_validator(
+        "min_price",
+        "max_price",
+        "min_area_sqm",
+        "max_area_sqm",
+        "max_down_payment",
+        "min_installment_years",
+        mode="before",
+    )
+    @classmethod
+    def normalize_business_decimal(cls, raw_number):
+        if (
+            raw_number is None
+            or isinstance(raw_number, Decimal)
+            or isinstance(raw_number, bool)
+        ):
+            return raw_number
+        try:
+            return Decimal(str(raw_number))
+        except (InvalidOperation, ValueError):
+            return raw_number
 
 
 LOCATION_ALIASES: dict[str, str] = {
@@ -131,7 +153,7 @@ def _extract_integer_count(
     return next(iter(values), None)
 
 
-def _extract_money_limit(text: str, limit_type: str) -> float | None:
+def _extract_money_limit(text: str, limit_type: str) -> Decimal | None:
     if limit_type == "max_price":
         patterns = [
             rf"\bmax\s+budget\s+(?:is\s+)?(?P<money>{_MONEY_PATTERN})\b",
@@ -146,7 +168,7 @@ def _extract_money_limit(text: str, limit_type: str) -> float | None:
     return _extract_first_money_match(text, patterns)
 
 
-def _extract_max_down_payment(text: str) -> float | None:
+def _extract_max_down_payment(text: str) -> Decimal | None:
     patterns = [
         rf"\bmax\s+down\s+payment\s+(?P<money>{_MONEY_PATTERN})\b",
         rf"\bdown\s+payment\s+up\s+to\s+(?P<money>{_MONEY_PATTERN})\b",
@@ -180,17 +202,17 @@ def _extract_payment_method(text: str) -> str | None:
     return next(iter(matches), None)
 
 
-def _extract_min_installment_years(text: str) -> float | None:
+def _extract_min_installment_years(text: str) -> Decimal | None:
     patterns = [
         r"\b(\d+(?:\.\d+)?)\s+years?\s+installments?\b",
         r"\binstallments?\s+over\s+(\d+(?:\.\d+)?)\s+years?\b",
         r"\bminimum\s+(\d+(?:\.\d+)?)\s+years?\b",
     ]
-    values: set[float] = set()
+    values: set[Decimal] = set()
 
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
-            values.add(float(match.group(1)))
+            values.add(Decimal(match.group(1)))
 
     if len(values) > 1:
         raise ValueError(f"Conflicting installment year values found: {sorted(values)}")

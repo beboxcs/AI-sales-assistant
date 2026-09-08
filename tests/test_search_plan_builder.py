@@ -1,4 +1,5 @@
 import copy
+from decimal import Decimal
 
 import pytest
 
@@ -473,6 +474,21 @@ def test_max_price_delta_and_percentage_relaxations_use_baseline():
     assert percentage_plan.attempts[1].filters.max_price == 8_400_000
     assert both_plan.attempts[1].filters.max_price == 8_400_000
     assert both_plan.attempts[1].adjustments[0].original_value == 8_000_000
+    assert isinstance(percentage_plan.attempts[1].filters.max_price, Decimal)
+    assert isinstance(percentage_plan.attempts[1].adjustments[0].adjusted_value, Decimal)
+
+
+def test_percentage_relaxation_uses_decimal_arithmetic():
+    plan = build_search_plan(
+        _strategy(
+            SearchFilters(max_price=Decimal("0.10")),
+            [_rule(SearchField.MAX_PRICE, "increase", max_percentage=10)],
+        )
+    )
+
+    assert plan.attempts[1].filters.max_price == Decimal("0.11")
+    assert plan.attempts[1].adjustments[0].original_value == Decimal("0.10")
+    assert plan.attempts[1].adjustments[0].adjusted_value == Decimal("0.11")
 
 
 def test_priority_tiers_are_cumulative_and_same_priority_fields_apply_together():

@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation
+
 from pydantic import ValidationError
 
 from app.ai_engine.search_filters import SearchFilters
@@ -383,13 +385,26 @@ def _adjusted_value(
     return adjusted_value
 
 
-def _effective_magnitude(original_value: float | int, rule: RelaxationRule) -> float:
+def _effective_magnitude(original_value: object, rule: RelaxationRule) -> Decimal:
     candidates = []
     if rule.max_delta is not None:
-        candidates.append(rule.max_delta)
+        candidates.append(_to_decimal(rule.max_delta))
     if rule.max_percentage is not None:
-        candidates.append(abs(original_value) * rule.max_percentage / 100)
+        candidates.append(
+            abs(_to_decimal(original_value))
+            * _to_decimal(rule.max_percentage)
+            / Decimal("100")
+        )
     return min(candidates)
+
+
+def _to_decimal(numeric_value: object) -> Decimal:
+    if isinstance(numeric_value, Decimal):
+        return numeric_value
+    try:
+        return Decimal(str(numeric_value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("relaxation value must be numeric") from exc
 
 
 def _effective_direction(rule: RelaxationRule) -> RelaxationDirection:
