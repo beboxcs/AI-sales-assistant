@@ -1,15 +1,21 @@
 from fastapi.testclient import TestClient
 import pytest
 
+from app.ai_engine.inventory_application import (
+    InventoryIngestionConflictError,
+    InventoryIngestionError,
+    InventoryIngestionPersistenceError,
+    InventoryIngestionResult,
+    InventoryScopeError,
+    InventorySourceMalformedError,
+    InventoryValidationFailedError,
+    ingest_inventory,
+)
+from app.ai_engine.inventory_ingestion import InventorySource
 from app.api.dependencies import (
     get_inventory_ingest_max_upload_bytes,
     get_inventory_ingestion_service,
     get_trusted_company_id,
-)
-from app.api.inventory_ingestion_seam import (
-    InventoryIngestionError,
-    InventoryIngestionResult,
-    InventorySource,
 )
 from app.main import app
 
@@ -27,9 +33,15 @@ def test_csv_upload_is_accepted_and_passed_as_inventory_source(
 
     assert response.status_code == 200
     assert response.json() == {
-        "status": "accepted",
-        "filename": "inventory.csv",
         "scope_key": "scope:nc",
+        "source_filename": "inventory.csv",
+        "total_rows": 1,
+        "accepted_units": 1,
+        "rejected_rows": 0,
+        "added_count": 1,
+        "updated_count": 0,
+        "missing_count": 0,
+        "persisted": True,
     }
     assert len(calls) == 1
     assert calls[0]["company_id"] == 42
@@ -149,6 +161,10 @@ def test_application_service_is_called_exactly_once(ingestion_client_factory):
     assert len(calls) == 1
 
 
+def test_inventory_ingestion_service_dependency_wires_real_application_service():
+    assert get_inventory_ingestion_service() is ingest_inventory
+
+
 def test_application_level_errors_are_mapped_to_safe_response(
     ingestion_client_factory,
 ):
@@ -171,6 +187,70 @@ def test_application_level_errors_are_mapped_to_safe_response(
     }
     assert "postgresql://secret" not in response.text
     assert "SELECT *" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_error"),
+    [
+        (
+            InventorySourceMalformedError("internal parser detail"),
+            400,
+            {
+                "code": "INVENTORY_SOURCE_MALFORMED",
+                "message": "Inventory upload could not be parsed",
+            },
+        ),
+        (
+            InventoryValidationFailedError("internal validation detail"),
+            422,
+            {
+                "code": "INVENTORY_VALIDATION_FAILED",
+                "message": "Inventory upload failed validation",
+            },
+        ),
+        (
+            InventoryScopeError("tenant scope detail"),
+            404,
+            {
+                "code": "INVENTORY_SCOPE_NOT_FOUND",
+                "message": "Inventory scope could not be found",
+            },
+        ),
+        (
+            InventoryIngestionConflictError("internal conflict detail"),
+            409,
+            {
+                "code": "INVENTORY_INGESTION_CONFLICT",
+                "message": "Inventory ingestion conflicts with existing data",
+            },
+        ),
+        (
+            InventoryIngestionPersistenceError("internal database detail"),
+            500,
+            {
+                "code": "INVENTORY_INGESTION_FAILED",
+                "message": "Inventory ingestion could not be completed",
+            },
+        ),
+    ],
+)
+def test_real_application_errors_are_mapped_to_safe_responses(
+    ingestion_client_factory,
+    error,
+    expected_status,
+    expected_error,
+):
+    client, _ = ingestion_client_factory(error=error)
+
+    response = client.post(
+        "/api/v1/inventory/ingest",
+        data={"scope_key": "scope:nc"},
+        files={"file": ("inventory.csv", b"unit", "text/csv")},
+    )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"error": expected_error}
+    assert str(error) not in response.text
 
 
 def test_unexpected_application_errors_are_mapped_to_safe_response(
@@ -231,9 +311,15 @@ def ingestion_client_factory():
                 }
             )
             return InventoryIngestionResult(
-                status="accepted",
-                filename=source.filename,
                 scope_key=scope_key,
+                source_filename=source.filename,
+                total_rows=1,
+                accepted_units=1,
+                rejected_rows=0,
+                added_count=1,
+                updated_count=0,
+                missing_count=0,
+                persisted=True,
             )
 
         app.dependency_overrides[get_trusted_company_id] = lambda: 42

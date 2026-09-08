@@ -3,17 +3,23 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel
 
+from app.ai_engine.inventory_application import (
+    InventoryIngestionConflictError,
+    InventoryIngestionError,
+    InventoryIngestionPersistenceError,
+    InventoryScopeError,
+    InventorySourceMalformedError,
+    InventorySourceUnsupportedError,
+    InventoryValidationFailedError,
+)
+from app.ai_engine.inventory_ingestion import InventorySource
 from app.api.dependencies import (
+    InventoryIngestionService,
     get_inventory_ingest_max_upload_bytes,
     get_inventory_ingestion_service,
     get_trusted_company_id,
 )
 from app.api.errors import APIError
-from app.api.inventory_ingestion_seam import (
-    InventoryIngestionError,
-    InventoryIngestionService,
-    InventorySource,
-)
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
@@ -21,9 +27,15 @@ _ALLOWED_INVENTORY_EXTENSIONS = {".csv", ".xlsx"}
 
 
 class InventoryIngestionResponse(BaseModel):
-    status: str
-    filename: str
     scope_key: str
+    source_filename: str
+    total_rows: int
+    accepted_units: int
+    rejected_rows: int
+    added_count: int
+    updated_count: int
+    missing_count: int
+    persisted: bool
 
 
 @router.post("/ingest", response_model=InventoryIngestionResponse)
@@ -58,11 +70,7 @@ async def ingest_inventory(
             source=InventorySource(filename=filename, content=content),
         )
     except InventoryIngestionError as exc:
-        raise APIError(
-            status_code=500,
-            code="INVENTORY_INGESTION_FAILED",
-            message="Inventory ingestion could not be completed",
-        ) from exc
+        raise _inventory_ingestion_api_error(exc) from exc
     except APIError:
         raise
     except Exception as exc:
@@ -73,7 +81,57 @@ async def ingest_inventory(
         ) from exc
 
     return InventoryIngestionResponse(
-        status=result.status,
-        filename=result.filename,
         scope_key=result.scope_key,
+        source_filename=result.source_filename,
+        total_rows=result.total_rows,
+        accepted_units=result.accepted_units,
+        rejected_rows=result.rejected_rows,
+        added_count=result.added_count,
+        updated_count=result.updated_count,
+        missing_count=result.missing_count,
+        persisted=result.persisted,
+    )
+
+
+def _inventory_ingestion_api_error(exc: InventoryIngestionError) -> APIError:
+    if isinstance(exc, InventorySourceUnsupportedError):
+        return APIError(
+            status_code=400,
+            code="INVALID_INVENTORY_FILE_TYPE",
+            message="Inventory upload must be a CSV or XLSX file",
+        )
+    if isinstance(exc, InventorySourceMalformedError):
+        return APIError(
+            status_code=400,
+            code="INVENTORY_SOURCE_MALFORMED",
+            message="Inventory upload could not be parsed",
+        )
+    if isinstance(exc, InventoryValidationFailedError):
+        return APIError(
+            status_code=422,
+            code="INVENTORY_VALIDATION_FAILED",
+            message="Inventory upload failed validation",
+        )
+    if isinstance(exc, InventoryScopeError):
+        return APIError(
+            status_code=404,
+            code="INVENTORY_SCOPE_NOT_FOUND",
+            message="Inventory scope could not be found",
+        )
+    if isinstance(exc, InventoryIngestionConflictError):
+        return APIError(
+            status_code=409,
+            code="INVENTORY_INGESTION_CONFLICT",
+            message="Inventory ingestion conflicts with existing data",
+        )
+    if isinstance(exc, InventoryIngestionPersistenceError):
+        return APIError(
+            status_code=500,
+            code="INVENTORY_INGESTION_FAILED",
+            message="Inventory ingestion could not be completed",
+        )
+    return APIError(
+        status_code=500,
+        code="INVENTORY_INGESTION_FAILED",
+        message="Inventory ingestion could not be completed",
     )
