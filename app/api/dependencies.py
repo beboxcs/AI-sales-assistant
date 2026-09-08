@@ -6,7 +6,6 @@ from app.ai_engine.inventory_application import (
 )
 from app.ai_engine.inventory_ingestion import InventorySource
 from app.config import settings
-from app.database import get_db as get_db_session
 from app.search.contracts import SearchExecutionContext
 from app.search.scope_resolution import resolve_search_execution_context
 
@@ -48,7 +47,6 @@ def get_inventory_ingest_max_upload_bytes() -> int:
 __all__ = [
     "InventoryIngestionService",
     "SearchContextResolver",
-    "get_db_session",
     "get_inventory_ingest_max_upload_bytes",
     "get_inventory_ingestion_service",
     "get_search_context_resolver",
