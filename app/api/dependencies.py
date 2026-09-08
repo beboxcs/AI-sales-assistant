@@ -1,5 +1,9 @@
 from typing import Protocol
 
+from app.api.inventory_ingestion_seam import (
+    InventoryIngestionService,
+    unavailable_ingest_inventory,
+)
 from app.config import settings
 from app.database import get_db as get_db_session
 from app.search.contracts import SearchExecutionContext
@@ -22,9 +26,20 @@ def get_trusted_company_id() -> int:
 def get_search_context_resolver() -> SearchContextResolver:
     return resolve_search_execution_context
 
+
+def get_inventory_ingestion_service() -> InventoryIngestionService:
+    return unavailable_ingest_inventory
+
+
+def get_inventory_ingest_max_upload_bytes() -> int:
+    return settings.INVENTORY_INGEST_MAX_UPLOAD_BYTES
+
 __all__ = [
+    "InventoryIngestionService",
     "SearchContextResolver",
     "get_db_session",
+    "get_inventory_ingest_max_upload_bytes",
+    "get_inventory_ingestion_service",
     "get_search_context_resolver",
     "get_trusted_company_id",
 ]
