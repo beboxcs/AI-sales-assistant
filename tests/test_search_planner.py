@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from pydantic import ValidationError
 
@@ -176,6 +178,20 @@ def test_widened_adjustment_must_change_the_original_value():
             original_value=3,
             adjusted_value=3,
         )
+
+
+def test_numeric_adjustment_values_are_decimal_safe():
+    adjustment = FieldAdjustment(
+        field="max_price",
+        action="widened",
+        original_value=0.1,
+        adjusted_value=0.11,
+    )
+
+    assert adjustment.original_value == Decimal("0.1")
+    assert adjustment.adjusted_value == Decimal("0.11")
+    assert isinstance(adjustment.original_value, Decimal)
+    assert isinstance(adjustment.adjusted_value, Decimal)
 
 
 @pytest.mark.parametrize("mode", [MatchMode.NEAR, MatchMode.ALTERNATIVE])

@@ -439,4 +439,4 @@ def test_model_dump_json_is_json_safe():
     assert dumped["match_mode"] == "exact"
     assert dumped["constraints"][0] == {"field": "min_price", "strength": "hard"}
     assert dumped["ranking_preferences"][0]["weight"] == 1.5
-    assert dumped["filters"]["min_price"] == 5_000_000.0
+    assert dumped["filters"]["min_price"] == "5000000"

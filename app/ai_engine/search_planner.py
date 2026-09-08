@@ -1,7 +1,8 @@
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import TypeAlias
 
-from pydantic import BaseModel, Field, FiniteFloat, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.ai_engine.search_filters import SearchFilters
 from app.ai_engine.search_strategy import MatchMode, SearchField
@@ -12,7 +13,7 @@ class AdjustmentAction(str, Enum):
     DROPPED = "dropped"
 
 
-ContractValue: TypeAlias = str | int | FiniteFloat | bool | None
+ContractValue: TypeAlias = str | bool | int | Decimal | None
 
 
 class FieldAdjustment(BaseModel):
@@ -20,6 +21,27 @@ class FieldAdjustment(BaseModel):
     action: AdjustmentAction
     original_value: ContractValue
     adjusted_value: ContractValue
+
+    @field_validator("original_value", "adjusted_value", mode="before")
+    @classmethod
+    def normalize_numeric_value(cls, raw_contract_value):
+        if raw_contract_value is None or isinstance(
+            raw_contract_value, (Decimal, bool)
+        ):
+            return raw_contract_value
+        if isinstance(raw_contract_value, float):
+            try:
+                return Decimal(str(raw_contract_value))
+            except (InvalidOperation, ValueError):
+                return raw_contract_value
+        return raw_contract_value
+
+    @field_validator("original_value", "adjusted_value")
+    @classmethod
+    def numeric_values_must_be_finite(cls, contract_value):
+        if isinstance(contract_value, Decimal) and not contract_value.is_finite():
+            raise ValueError("numeric adjustment values must be finite")
+        return contract_value
 
     @model_validator(mode="after")
     def validate_values(self) -> "FieldAdjustment":
