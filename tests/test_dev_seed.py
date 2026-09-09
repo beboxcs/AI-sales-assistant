@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.dependencies import get_trusted_company_id
 from app.config import settings
 from app.database import engine
 from app.dev import seed
@@ -64,7 +63,6 @@ def test_seed_creates_exact_acceptance_dataset(db_session: Session):
     assert counts == EXPECTED_COUNTS
     assert _database_counts(db_session, company.id) == EXPECTED_COUNTS
     assert company.id == settings.DEV_COMPANY_ID
-    assert company.id == get_trusted_company_id()
     assert company.name == seed.DEVELOPMENT_COMPANY_NAME
     assert set(scopes) == {"scope-nc-main", "scope-zayed-main"}
     assert set(compounds) == {"palm-east", "zayed-heights"}

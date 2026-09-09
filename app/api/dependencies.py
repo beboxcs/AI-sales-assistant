@@ -5,6 +5,7 @@ from app.ai_engine.inventory_application import (
     ingest_inventory,
 )
 from app.ai_engine.inventory_ingestion import InventorySource
+from app.api.security import get_trusted_company_id
 from app.config import settings
 from app.search.contracts import SearchExecutionContext
 from app.search.scope_resolution import resolve_search_execution_context
@@ -27,10 +28,6 @@ class SearchContextResolver(Protocol):
         company_id: int,
         requested_scope_keys: tuple[str, ...] | None,
     ) -> SearchExecutionContext: ...
-
-
-def get_trusted_company_id() -> int:
-    return settings.DEV_COMPANY_ID
 
 
 def get_search_context_resolver() -> SearchContextResolver:
