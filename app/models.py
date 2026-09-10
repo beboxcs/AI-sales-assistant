@@ -23,9 +23,10 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
+from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship, validates
 
 from app.database import Base
+from app.domain.users import normalize_email
 
 
 class Company(Base):
@@ -48,6 +49,9 @@ class Company(Base):
         back_populates="company", foreign_keys="InventoryScope.company_id"
     )
     api_credentials: Mapped[list[ApiCredential]] = relationship(
+        back_populates="company"
+    )
+    memberships: Mapped[list[CompanyMembership]] = relationship(
         back_populates="company"
     )
 
@@ -107,6 +111,111 @@ class ApiCredential(Base):
     )
 
     company: Mapped[Company] = relationship(back_populates="api_credentials")
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_email",
+            name="uq_users_normalized_email",
+        ),
+        CheckConstraint(
+            "normalized_email ~ '[^[:space:]]'",
+            name="ck_users_normalized_email_not_blank",
+        ),
+        CheckConstraint(
+            "password_hash ~ '[^[:space:]]'",
+            name="ck_users_password_hash_not_blank",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    normalized_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    memberships: Mapped[list[CompanyMembership]] = relationship(
+        back_populates="user"
+    )
+
+    # Human identity writes are supported through this ORM boundary. Direct
+    # SQL/Core writes bypass normalization and are not an application write path;
+    # uq_users_normalized_email enforces uniqueness of the canonical result.
+    @validates("normalized_email")
+    def normalize_normalized_email(self, _key: str, value: str) -> str:
+        return normalize_email(value)
+
+
+class CompanyMembership(Base):
+    __tablename__ = "company_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "company_id",
+            name="uq_company_memberships_user_company",
+        ),
+        CheckConstraint(
+            "role IN ('salesperson', 'company_admin')",
+            name="ck_company_memberships_role_allowed",
+        ),
+        CheckConstraint(
+            "deactivated_at IS NULL OR is_active = false",
+            name="ck_company_memberships_deactivated_inactive",
+        ),
+        Index("ix_company_memberships_company_id", "company_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "users.id",
+            name="fk_company_memberships_user",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "companies.id",
+            name="fk_company_memberships_company",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped[User] = relationship(back_populates="memberships")
+    company: Mapped[Company] = relationship(back_populates="memberships")
 
 
 class Compound(Base):

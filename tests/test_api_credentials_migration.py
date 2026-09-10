@@ -396,7 +396,7 @@ def test_downgrade_removes_only_auth_schema_and_returns_to_previous_revision(
 def test_alembic_check_reports_no_model_drift(
     migration_database: MigrationDatabase,
 ) -> None:
-    command.upgrade(migration_database.config, AUTH_REVISION)
+    command.upgrade(migration_database.config, "head")
 
     command.check(migration_database.config)
 

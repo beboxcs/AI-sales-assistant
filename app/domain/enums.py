@@ -17,3 +17,8 @@ class PaymentMethod(str, Enum):
 
 class Currency(str, Enum):
     EGP = "EGP"
+
+
+class MembershipRole(str, Enum):
+    SALESPERSON = "salesperson"
+    COMPANY_ADMIN = "company_admin"
