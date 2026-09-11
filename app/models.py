@@ -165,6 +165,12 @@ class CompanyMembership(Base):
     __tablename__ = "company_memberships"
     __table_args__ = (
         UniqueConstraint(
+            "id",
+            "user_id",
+            "company_id",
+            name="uq_company_memberships_id_user_company",
+        ),
+        UniqueConstraint(
             "user_id",
             "company_id",
             name="uq_company_memberships_user_company",
@@ -216,6 +222,56 @@ class CompanyMembership(Base):
 
     user: Mapped[User] = relationship(back_populates="memberships")
     company: Mapped[Company] = relationship(back_populates="memberships")
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "token_digest",
+            name="uq_user_sessions_token_digest",
+        ),
+        CheckConstraint(
+            "octet_length(token_digest) = 32",
+            name="ck_user_sessions_token_digest_sha256_length",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="ck_user_sessions_expiration_after_creation",
+        ),
+        ForeignKeyConstraint(
+            ["membership_id", "user_id", "company_id"],
+            [
+                "company_memberships.id",
+                "company_memberships.user_id",
+                "company_memberships.company_id",
+            ],
+            name="fk_user_sessions_membership_identity",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_user_sessions_company_id", "company_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    membership_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    company_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class Compound(Base):

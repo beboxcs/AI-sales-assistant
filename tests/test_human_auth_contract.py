@@ -192,17 +192,9 @@ def test_service_signatures_are_frozen():
             {"email": "user@example.com", "password": "secret"},
         ),
         (
-            create_session,
-            {
-                "principal": AuthenticatedPrincipal(
-                    1,
-                    2,
-                    3,
-                    MembershipRole.COMPANY_ADMIN,
-                )
-            },
+            resolve_session,
+            {"token": "token"},
         ),
-        (resolve_session, {"token": "token"}),
         (revoke_session, {"token": "token"}),
     ],
 )
