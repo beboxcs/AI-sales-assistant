@@ -17,8 +17,8 @@ from app.auth.human import (
 )
 from app.auth.human.service import (
     authenticate_credentials,
-    authenticate_session,
     create_session,
+    resolve_session,
     revoke_session,
 )
 from app.auth.human.types import (
@@ -43,7 +43,7 @@ PUBLIC_NAMES = [
     "AuthInfrastructureError",
     "authenticate_credentials",
     "create_session",
-    "authenticate_session",
+    "resolve_session",
     "revoke_session",
 ]
 
@@ -139,10 +139,14 @@ def test_new_public_errors_are_catchable_by_their_contract_base(
 def test_service_signatures_are_frozen():
     assert inspect.signature(authenticate_credentials) == inspect.Signature(
         [
-            inspect.Parameter("email", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str),
+            inspect.Parameter(
+                "email",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
             inspect.Parameter(
                 "password",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
                 annotation=str,
             ),
         ],
@@ -152,22 +156,17 @@ def test_service_signatures_are_frozen():
         [
             inspect.Parameter(
                 "principal",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
                 annotation=AuthenticatedPrincipal,
-            ),
-            inspect.Parameter(
-                "expires_at",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=datetime,
             ),
         ],
         return_annotation=CreatedSession,
     )
-    assert inspect.signature(authenticate_session) == inspect.Signature(
+    assert inspect.signature(resolve_session) == inspect.Signature(
         [
             inspect.Parameter(
                 "token",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
                 annotation=str,
             ),
         ],
@@ -176,9 +175,9 @@ def test_service_signatures_are_frozen():
     assert inspect.signature(revoke_session) == inspect.Signature(
         [
             inspect.Parameter(
-                "session_id",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=int,
+                "token",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
             ),
         ],
         return_annotation=None,
@@ -188,26 +187,43 @@ def test_service_signatures_are_frozen():
 @pytest.mark.parametrize(
     ("service_function", "arguments"),
     [
-        (authenticate_credentials, ("user@example.com", "secret")),
+        (
+            authenticate_credentials,
+            {"email": "user@example.com", "password": "secret"},
+        ),
         (
             create_session,
-            (
-                AuthenticatedPrincipal(
+            {
+                "principal": AuthenticatedPrincipal(
                     1,
                     2,
                     3,
                     MembershipRole.COMPANY_ADMIN,
-                ),
-                datetime(2026, 9, 11, tzinfo=timezone.utc),
-            ),
+                )
+            },
         ),
-        (authenticate_session, ("token",)),
-        (revoke_session, (4,)),
+        (resolve_session, {"token": "token"}),
+        (revoke_session, {"token": "token"}),
     ],
 )
 def test_service_placeholders_fail_closed(service_function, arguments):
     with pytest.raises(NotImplementedError):
-        service_function(*arguments)
+        service_function(**arguments)
+
+
+def test_create_session_rejects_caller_supplied_expiration():
+    principal = AuthenticatedPrincipal(
+        1,
+        2,
+        3,
+        MembershipRole.COMPANY_ADMIN,
+    )
+
+    with pytest.raises(TypeError):
+        create_session(
+            principal=principal,
+            expires_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+        )
 
 
 def test_package_reexports_only_the_frozen_public_contract():
