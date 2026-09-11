@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Response, Security
+from fastapi import Request, Response, Security
 from fastapi.security import APIKeyCookie, APIKeyHeader
 
 from app.api.errors import APIError
 from app.auth.contracts import TrustedTenantContext
 from app.auth.exceptions import AuthBackendError, InvalidApiCredentialError
 from app.auth.service import authenticate_api_key
-from app.config import settings
+from app.config import normalize_browser_origin, settings
 
 SESSION_COOKIE_NAME = "rea_session"
 SESSION_COOKIE_PATH = "/"
@@ -61,6 +61,25 @@ def resolve_trusted_tenant(
         raise _auth_backend_error() from exc
     except Exception as exc:
         raise _auth_backend_error() from exc
+
+
+def require_trusted_origin(request: Request) -> None:
+    """Reject missing, malformed, or unconfigured browser Origin headers."""
+    origin = request.headers.get("origin")
+    if not is_trusted_browser_origin(origin):
+        raise _untrusted_origin_error()
+
+
+def is_trusted_browser_origin(origin: str | None) -> bool:
+    if origin is None:
+        return False
+
+    try:
+        normalized_origin = normalize_browser_origin(origin)
+    except ValueError:
+        return False
+
+    return normalized_origin in set(settings.TRUSTED_BROWSER_ORIGINS)
 
 
 def set_session_cookie(
@@ -139,4 +158,12 @@ def _auth_backend_error() -> APIError:
         status_code=500,
         code="AUTHENTICATION_UNAVAILABLE",
         message="Authentication could not be completed",
+    )
+
+
+def _untrusted_origin_error() -> APIError:
+    return APIError(
+        status_code=403,
+        code="UNTRUSTED_ORIGIN",
+        message="Request origin is not trusted",
     )
