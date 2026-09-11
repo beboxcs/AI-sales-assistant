@@ -16,8 +16,8 @@ from app.auth.human.exceptions import (
 )
 from app.auth.human.service import (
     authenticate_credentials,
-    authenticate_session,
     create_session,
+    resolve_session,
     revoke_session,
 )
 from app.auth.human.types import (
@@ -40,6 +40,6 @@ __all__ = [
     "AuthInfrastructureError",
     "authenticate_credentials",
     "create_session",
-    "authenticate_session",
+    "resolve_session",
     "revoke_session",
 ]
