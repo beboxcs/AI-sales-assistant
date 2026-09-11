@@ -2,9 +2,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import pytest
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from app.ai_engine.inventory_application import InventoryIngestionResult
+from app.api.errors import register_exception_handlers
 from app.api import security as api_security
 from app.api.dependencies import (
     get_inventory_ingest_max_upload_bytes,
@@ -63,6 +65,64 @@ def test_missing_api_key_returns_generic_401(auth_client):
 
     assert response.status_code == 401
     assert response.json() == _invalid_credential_response()
+
+
+def test_api_key_only_does_not_trigger_credential_ambiguity():
+    response = _ambiguity_client().get(
+        "/credential-check",
+        headers={"X-API-Key": RAW_KEY},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_session_cookie_only_does_not_trigger_credential_ambiguity():
+    client = _ambiguity_client()
+    client.cookies.set("rea_session", "session-token-secret")
+
+    response = client.get("/credential-check")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_absent_credentials_do_not_trigger_credential_ambiguity():
+    response = _ambiguity_client().get("/credential-check")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_api_key_and_session_cookie_are_rejected_as_ambiguous_credentials():
+    session_token = "session-token-secret"
+    client = _ambiguity_client()
+    client.cookies.set("rea_session", session_token)
+
+    response = client.get(
+        "/credential-check",
+        headers={"X-API-Key": RAW_KEY},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "code": "AMBIGUOUS_CREDENTIALS",
+            "message": "Use exactly one authentication credential type",
+        }
+    }
+    assert RAW_KEY not in response.text
+    assert session_token not in response.text
+
+
+def test_session_cookie_openapi_scheme_foundation_is_preserved():
+    schema = _ambiguity_client().get("/openapi.json").json()
+
+    assert schema["components"]["securitySchemes"]["SessionCookieAuth"] == {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "rea_session",
+    }
 
 
 def test_malformed_api_key_returns_generic_401(auth_client):
@@ -557,3 +617,17 @@ def _invalid_credential_response():
             "message": "Invalid or unavailable API credential",
         }
     }
+
+
+def _ambiguity_client() -> TestClient:
+    test_app = FastAPI()
+    register_exception_handlers(test_app)
+
+    @test_app.get(
+        "/credential-check",
+        dependencies=[Depends(api_security.require_unambiguous_credentials)],
+    )
+    def credential_check():
+        return {"status": "ok"}
+
+    return TestClient(test_app)

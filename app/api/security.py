@@ -1,5 +1,5 @@
 from fastapi import Security
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyCookie, APIKeyHeader
 
 from app.api.errors import APIError
 from app.auth.contracts import TrustedTenantContext
@@ -12,6 +12,23 @@ api_key_header = APIKeyHeader(
     scheme_name="ApiKeyAuth",
     auto_error=False,
 )
+session_cookie = APIKeyCookie(
+    name="rea_session",
+    scheme_name="SessionCookieAuth",
+    auto_error=False,
+)
+
+
+def require_unambiguous_credentials(
+    raw_api_key: str | None = Security(api_key_header),
+    session_token: str | None = Security(session_cookie),
+) -> None:
+    if raw_api_key is not None and session_token is not None:
+        raise APIError(
+            status_code=400,
+            code="AMBIGUOUS_CREDENTIALS",
+            message="Use exactly one authentication credential type",
+        )
 
 
 def get_trusted_company_id(
