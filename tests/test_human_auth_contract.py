@@ -152,13 +152,8 @@ def test_service_signatures_are_frozen():
         [
             inspect.Parameter(
                 "principal",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
                 annotation=AuthenticatedPrincipal,
-            ),
-            inspect.Parameter(
-                "expires_at",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=datetime,
             ),
         ],
         return_annotation=CreatedSession,
@@ -188,26 +183,40 @@ def test_service_signatures_are_frozen():
 @pytest.mark.parametrize(
     ("service_function", "arguments"),
     [
-        (authenticate_credentials, ("user@example.com", "secret")),
-        (
-            create_session,
-            (
-                AuthenticatedPrincipal(
-                    1,
-                    2,
-                    3,
-                    MembershipRole.COMPANY_ADMIN,
-                ),
-                datetime(2026, 9, 11, tzinfo=timezone.utc),
-            ),
-        ),
         (authenticate_session, ("token",)),
         (revoke_session, (4,)),
     ],
 )
-def test_service_placeholders_fail_closed(service_function, arguments):
+def test_session_service_placeholders_fail_closed(service_function, arguments):
     with pytest.raises(NotImplementedError):
         service_function(*arguments)
+
+
+def test_create_session_keyword_only_placeholder_fails_closed():
+    principal = AuthenticatedPrincipal(
+        1,
+        2,
+        3,
+        MembershipRole.COMPANY_ADMIN,
+    )
+
+    with pytest.raises(NotImplementedError):
+        create_session(principal=principal)
+
+
+def test_create_session_rejects_caller_supplied_expiration():
+    principal = AuthenticatedPrincipal(
+        1,
+        2,
+        3,
+        MembershipRole.COMPANY_ADMIN,
+    )
+
+    with pytest.raises(TypeError):
+        create_session(
+            principal=principal,
+            expires_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+        )
 
 
 def test_package_reexports_only_the_frozen_public_contract():
