@@ -11,6 +11,7 @@ from app.api import security as api_security
 from app.api.dependencies import (
     get_inventory_ingest_max_upload_bytes,
     get_inventory_ingestion_service,
+    get_search_company_id,
     get_search_context_resolver,
     get_trusted_company_id,
 )
@@ -60,11 +61,11 @@ def auth_client(monkeypatch):
         app.openapi_schema = original_openapi_schema
 
 
-def test_missing_api_key_returns_generic_401(auth_client):
+def test_missing_route_credentials_return_authentication_required(auth_client):
     response = auth_client().post("/api/v1/search", json={})
 
     assert response.status_code == 401
-    assert response.json() == _invalid_credential_response()
+    assert response.json() == _authentication_required_response()
 
 
 def test_api_key_only_does_not_trigger_credential_ambiguity():
@@ -353,7 +354,7 @@ def test_two_companies_resolve_independently_without_tenant_leakage(
     assert resolver_company_ids == [100, 200]
 
 
-def test_local_dev_company_id_bypass_works_only_in_local_mode(
+def test_combined_inventory_route_does_not_use_local_dev_company_fallback(
     auth_client,
     monkeypatch,
 ):
@@ -390,8 +391,9 @@ def test_local_dev_company_id_bypass_works_only_in_local_mode(
         files={"file": ("inventory.csv", b"unit", "text/csv")},
     )
 
-    assert response.status_code == 200
-    assert calls == [(77, "scope:nc", "inventory.csv")]
+    assert response.status_code == 401
+    assert response.json() == _authentication_required_response()
+    assert calls == []
 
 
 def test_local_fallback_returns_company_id_without_trusted_tenant_context(
@@ -429,7 +431,7 @@ def test_deployed_environments_never_fall_back_to_dev_company_id(
     )
 
     assert response.status_code == 401
-    assert response.json() == _invalid_credential_response()
+    assert response.json() == _authentication_required_response()
     assert calls == []
 
 
@@ -448,6 +450,7 @@ def test_auth_failure_does_not_call_inventory_application(
     )
 
     assert response.status_code == 401
+    assert response.json() == _authentication_required_response()
     assert calls == []
 
 
@@ -493,12 +496,12 @@ def test_valid_key_passes_company_id_into_inventory_ingestion_once(
     assert calls == [(321, "scope:nc", "inventory.csv")]
 
 
-def test_trusted_company_dependency_override_remains_possible(
+def test_search_company_dependency_override_remains_possible(
     auth_client,
     monkeypatch,
 ):
     resolver_calls = []
-    app.dependency_overrides[get_trusted_company_id] = lambda: 909
+    app.dependency_overrides[get_search_company_id] = lambda: 909
     app.dependency_overrides[get_search_context_resolver] = lambda: (
         lambda *, company_id, requested_scope_keys: resolver_calls.append(
             company_id
@@ -601,10 +604,12 @@ def test_openapi_documents_api_key_security_and_search_body(auth_client):
         "name": "X-API-Key",
     }
     assert schema["paths"]["/api/v1/search"]["post"]["security"] == [
-        {"ApiKeyAuth": []}
+        {"ApiKeyAuth": []},
+        {"SessionCookieAuth": []},
     ]
     assert schema["paths"]["/api/v1/inventory/ingest"]["post"]["security"] == [
-        {"ApiKeyAuth": []}
+        {"ApiKeyAuth": []},
+        {"SessionCookieAuth": []},
     ]
     assert "requestBody" in schema["paths"]["/api/v1/search"]["post"]
     assert "parameters" not in schema["paths"]["/api/v1/search"]["post"]
@@ -615,6 +620,15 @@ def _invalid_credential_response():
         "error": {
             "code": "INVALID_API_CREDENTIAL",
             "message": "Invalid or unavailable API credential",
+        }
+    }
+
+
+def _authentication_required_response():
+    return {
+        "error": {
+            "code": "AUTHENTICATION_REQUIRED",
+            "message": "Authentication is required",
         }
     }
 

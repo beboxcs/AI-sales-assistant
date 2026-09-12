@@ -12,7 +12,7 @@ from app.ai_engine.search_filters import SearchFilters
 from app.api.dependencies import (
     SearchContextResolver,
     get_search_context_resolver,
-    get_trusted_company_id,
+    get_search_company_id,
 )
 from app.api.errors import APIError
 from app.domain.enums import PaymentMethod
@@ -208,7 +208,7 @@ def _body_validation_errors(exc: ValidationError) -> list[dict[str, Any]]:
 )
 def search_units(
     request: SearchRequest = Depends(_parse_search_request),
-    company_id: int = Depends(get_trusted_company_id),
+    company_id: int = Depends(get_search_company_id),
     resolve_context: SearchContextResolver = Depends(get_search_context_resolver),
 ) -> SearchResponse:
     filters = request.to_filters()
