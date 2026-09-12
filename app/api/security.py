@@ -1,5 +1,6 @@
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Protocol
+from typing import Literal, Protocol
 
 from fastapi import Depends, Request, Response, Security
 from fastapi.security import APIKeyCookie, APIKeyHeader
@@ -33,6 +34,22 @@ session_cookie = APIKeyCookie(
 )
 
 
+@dataclass(frozen=True)
+class TrustedRequestIdentity:
+    company_id: int
+    auth_method: Literal["api_key", "human_session"]
+    human_user: AuthenticatedUserContext | None = None
+
+
+class ApiKeyTenantResolver(Protocol):
+    def __call__(self, *, raw_api_key: str) -> TrustedTenantContext: ...
+
+
+class PublicApiKeyTenantResolver:
+    def __call__(self, *, raw_api_key: str) -> TrustedTenantContext:
+        return resolve_trusted_tenant(raw_api_key)
+
+
 class HumanSessionResolver(Protocol):
     def __call__(self, *, token: str) -> AuthenticatedUserContext: ...
 
@@ -46,6 +63,10 @@ def get_human_session_resolver() -> HumanSessionResolver:
     return PublicHumanSessionResolver()
 
 
+def get_api_key_tenant_resolver() -> ApiKeyTenantResolver:
+    return PublicApiKeyTenantResolver()
+
+
 def require_unambiguous_credentials(
     raw_api_key: str | None = Security(api_key_header),
     session_token: str | None = Security(session_cookie),
@@ -56,6 +77,54 @@ def require_unambiguous_credentials(
             code="AMBIGUOUS_CREDENTIALS",
             message="Use exactly one authentication credential type",
         )
+
+
+def get_trusted_request_identity(
+    raw_api_key: str | None = Security(api_key_header),
+    session_token: str | None = Security(session_cookie),
+    resolve_api_key_tenant: ApiKeyTenantResolver = Depends(
+        get_api_key_tenant_resolver
+    ),
+    resolve_human_session: HumanSessionResolver = Depends(
+        get_human_session_resolver
+    ),
+) -> TrustedRequestIdentity:
+    require_unambiguous_credentials(
+        raw_api_key=raw_api_key,
+        session_token=session_token,
+    )
+
+    if raw_api_key is not None:
+        try:
+            trusted_tenant = resolve_api_key_tenant(raw_api_key=raw_api_key)
+        except APIError:
+            raise
+        except Exception as exc:
+            raise _auth_backend_error() from exc
+        return TrustedRequestIdentity(
+            company_id=trusted_tenant.company_id,
+            auth_method="api_key",
+            human_user=None,
+        )
+
+    if session_token is not None:
+        human_user = _resolve_human_session_context(
+            session_token=session_token,
+            resolve_human_session=resolve_human_session,
+        )
+        return TrustedRequestIdentity(
+            company_id=human_user.company_id,
+            auth_method="human_session",
+            human_user=human_user,
+        )
+
+    raise _authentication_required_error()
+
+
+def get_trusted_request_company_id(
+    identity: TrustedRequestIdentity = Depends(get_trusted_request_identity),
+) -> int:
+    return identity.company_id
 
 
 def get_current_user(
@@ -72,6 +141,17 @@ def get_current_user(
     if session_token is None:
         raise _invalid_session_error()
 
+    return _resolve_human_session_context(
+        session_token=session_token,
+        resolve_human_session=resolve_human_session,
+    )
+
+
+def _resolve_human_session_context(
+    *,
+    session_token: str,
+    resolve_human_session: HumanSessionResolver,
+) -> AuthenticatedUserContext:
     try:
         return resolve_human_session(token=session_token)
     except InvalidSessionError as exc:
@@ -202,6 +282,14 @@ def _invalid_session_error() -> APIError:
         status_code=401,
         code="INVALID_SESSION",
         message="Invalid or unavailable session",
+    )
+
+
+def _authentication_required_error() -> APIError:
+    return APIError(
+        status_code=401,
+        code="AUTHENTICATION_REQUIRED",
+        message="Authentication is required",
     )
 
 
