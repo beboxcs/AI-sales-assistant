@@ -1,11 +1,18 @@
 from datetime import datetime, timedelta, timezone
+from typing import Protocol
 
-from fastapi import Request, Response, Security
+from fastapi import Depends, Request, Response, Security
 from fastapi.security import APIKeyCookie, APIKeyHeader
 
 from app.api.errors import APIError
 from app.auth.contracts import TrustedTenantContext
 from app.auth.exceptions import AuthBackendError, InvalidApiCredentialError
+from app.auth.human.exceptions import (
+    AuthInfrastructureError,
+    InvalidSessionError,
+)
+from app.auth.human.service import resolve_session
+from app.auth.human.types import AuthenticatedUserContext
 from app.auth.service import authenticate_api_key
 from app.config import normalize_browser_origin, settings
 
@@ -26,6 +33,19 @@ session_cookie = APIKeyCookie(
 )
 
 
+class HumanSessionResolver(Protocol):
+    def __call__(self, *, token: str) -> AuthenticatedUserContext: ...
+
+
+class PublicHumanSessionResolver:
+    def __call__(self, *, token: str) -> AuthenticatedUserContext:
+        return resolve_session(token=token)
+
+
+def get_human_session_resolver() -> HumanSessionResolver:
+    return PublicHumanSessionResolver()
+
+
 def require_unambiguous_credentials(
     raw_api_key: str | None = Security(api_key_header),
     session_token: str | None = Security(session_cookie),
@@ -36,6 +56,30 @@ def require_unambiguous_credentials(
             code="AMBIGUOUS_CREDENTIALS",
             message="Use exactly one authentication credential type",
         )
+
+
+def get_current_user(
+    request: Request,
+    session_token: str | None = Security(session_cookie),
+    resolve_human_session: HumanSessionResolver = Depends(
+        get_human_session_resolver
+    ),
+) -> AuthenticatedUserContext:
+    require_unambiguous_credentials(
+        raw_api_key=request.headers.get("x-api-key"),
+        session_token=session_token,
+    )
+    if session_token is None:
+        raise _invalid_session_error()
+
+    try:
+        return resolve_human_session(token=session_token)
+    except InvalidSessionError as exc:
+        raise _invalid_session_error() from exc
+    except AuthInfrastructureError as exc:
+        raise _auth_backend_error() from exc
+    except Exception as exc:
+        raise _auth_backend_error() from exc
 
 
 def get_trusted_company_id(
@@ -150,6 +194,14 @@ def _invalid_credential_error() -> APIError:
         status_code=401,
         code="INVALID_API_CREDENTIAL",
         message="Invalid or unavailable API credential",
+    )
+
+
+def _invalid_session_error() -> APIError:
+    return APIError(
+        status_code=401,
+        code="INVALID_SESSION",
+        message="Invalid or unavailable session",
     )
 
 
