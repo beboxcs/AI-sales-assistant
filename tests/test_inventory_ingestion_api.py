@@ -13,9 +13,9 @@ from app.ai_engine.inventory_application import (
 )
 from app.ai_engine.inventory_ingestion import InventorySource
 from app.api.dependencies import (
+    get_inventory_ingest_company_id,
     get_inventory_ingest_max_upload_bytes,
     get_inventory_ingestion_service,
-    get_trusted_company_id,
 )
 from app.main import app
 
@@ -322,7 +322,7 @@ def ingestion_client_factory():
                 persisted=True,
             )
 
-        app.dependency_overrides[get_trusted_company_id] = lambda: 42
+        app.dependency_overrides[get_inventory_ingest_company_id] = lambda: 42
         app.dependency_overrides[get_inventory_ingestion_service] = lambda: ingest
         app.dependency_overrides[get_inventory_ingest_max_upload_bytes] = (
             lambda: max_upload_bytes

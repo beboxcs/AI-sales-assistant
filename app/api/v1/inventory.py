@@ -15,9 +15,9 @@ from app.ai_engine.inventory_application import (
 from app.ai_engine.inventory_ingestion import InventorySource
 from app.api.dependencies import (
     InventoryIngestionService,
+    get_inventory_ingest_company_id,
     get_inventory_ingest_max_upload_bytes,
     get_inventory_ingestion_service,
-    get_trusted_company_id,
 )
 from app.api.errors import APIError
 
@@ -42,7 +42,7 @@ class InventoryIngestionResponse(BaseModel):
 async def ingest_inventory(
     scope_key: str = Form(...),
     file: UploadFile = File(...),
-    company_id: int = Depends(get_trusted_company_id),
+    company_id: int = Depends(get_inventory_ingest_company_id),
     ingest: InventoryIngestionService = Depends(get_inventory_ingestion_service),
     max_upload_bytes: int = Depends(get_inventory_ingest_max_upload_bytes),
 ) -> InventoryIngestionResponse:

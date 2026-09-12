@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_trusted_company_id
+from app.api.dependencies import get_search_company_id
 from app.database import engine
 from app.models import (
     Company,
@@ -59,7 +59,7 @@ def db_session() -> Generator[Session, None, None]:
 def test_search_a_path_runs_through_public_api(db_session, monkeypatch):
     _create_search_a_acceptance_rows(db_session)
     original_overrides = app.dependency_overrides.copy()
-    app.dependency_overrides[get_trusted_company_id] = (
+    app.dependency_overrides[get_search_company_id] = (
         lambda: ACCEPTANCE_COMPANY_ID
     )
     monkeypatch.setattr(

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app.ai_engine.search_filters import SearchFilters
 from app.api.dependencies import (
     get_search_context_resolver,
-    get_trusted_company_id,
+    get_search_company_id,
 )
 from app.api.v1 import search as search_route
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
@@ -82,7 +82,7 @@ def client(monkeypatch):
         calls["search"].append((filters, context))
         return _search_result()
 
-    app.dependency_overrides[get_trusted_company_id] = lambda: 42
+    app.dependency_overrides[get_search_company_id] = lambda: 42
     app.dependency_overrides[get_search_context_resolver] = lambda: resolver
     monkeypatch.setattr(search_route.search_application, "search_units", fake_search_units)
 
@@ -551,7 +551,7 @@ def _request_with_failing_resolver(monkeypatch, error: Exception):
     def resolver(*, company_id, requested_scope_keys):
         raise error
 
-    app.dependency_overrides[get_trusted_company_id] = lambda: 42
+    app.dependency_overrides[get_search_company_id] = lambda: 42
     app.dependency_overrides[get_search_context_resolver] = lambda: resolver
     monkeypatch.setattr(
         search_route.search_application,

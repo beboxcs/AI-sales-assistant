@@ -16,6 +16,7 @@ from app.auth.human.service import resolve_session
 from app.auth.human.types import AuthenticatedUserContext
 from app.auth.service import authenticate_api_key
 from app.config import normalize_browser_origin, settings
+from app.domain.enums import MembershipRole
 
 SESSION_COOKIE_NAME = "rea_session"
 SESSION_COOKIE_PATH = "/"
@@ -127,6 +128,29 @@ def get_trusted_request_company_id(
     return identity.company_id
 
 
+def get_search_company_id(
+    identity: TrustedRequestIdentity = Depends(get_trusted_request_identity),
+) -> int:
+    return _require_authorized_identity(
+        identity=identity,
+        allow_api_key=True,
+        allowed_human_roles={
+            MembershipRole.SALESPERSON,
+            MembershipRole.COMPANY_ADMIN,
+        },
+    ).company_id
+
+
+def get_inventory_ingest_company_id(
+    identity: TrustedRequestIdentity = Depends(get_trusted_request_identity),
+) -> int:
+    return _require_authorized_identity(
+        identity=identity,
+        allow_api_key=True,
+        allowed_human_roles={MembershipRole.COMPANY_ADMIN},
+    ).company_id
+
+
 def get_current_user(
     request: Request,
     session_token: str | None = Security(session_cookie),
@@ -160,6 +184,24 @@ def _resolve_human_session_context(
         raise _auth_backend_error() from exc
     except Exception as exc:
         raise _auth_backend_error() from exc
+
+
+def _require_authorized_identity(
+    *,
+    identity: TrustedRequestIdentity,
+    allow_api_key: bool,
+    allowed_human_roles: set[MembershipRole],
+) -> TrustedRequestIdentity:
+    if identity.auth_method == "api_key":
+        if allow_api_key:
+            return identity
+        raise _forbidden_error()
+
+    if identity.human_user is None:
+        raise _auth_backend_error()
+    if identity.human_user.role in allowed_human_roles:
+        return identity
+    raise _forbidden_error()
 
 
 def get_trusted_company_id(
@@ -290,6 +332,14 @@ def _authentication_required_error() -> APIError:
         status_code=401,
         code="AUTHENTICATION_REQUIRED",
         message="Authentication is required",
+    )
+
+
+def _forbidden_error() -> APIError:
+    return APIError(
+        status_code=403,
+        code="FORBIDDEN",
+        message="You do not have permission to perform this action",
     )
 
 
