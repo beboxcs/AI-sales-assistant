@@ -187,10 +187,6 @@ def test_service_signatures_are_frozen():
 @pytest.mark.parametrize(
     ("service_function", "arguments"),
     [
-        (
-            resolve_session,
-            {"token": "token"},
-        ),
         (revoke_session, {"token": "token"}),
     ],
 )

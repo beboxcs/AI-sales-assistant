@@ -139,6 +139,7 @@ def test_create_session_owns_expiry_and_returns_persisted_context(monkeypatch):
         "company_id": PRINCIPAL.company_id,
         "token_digest": TOKEN_DIGEST,
         "expires_at": expected_expiry,
+        "last_activity_at": NOW,
     }
     assert persisted_values["expires_at"] is created.expires_at
     assert session_factory.contexts[0].exited is True
@@ -246,6 +247,9 @@ def test_postgresql_session_row_persists_authoritative_identity_and_expiry(
         assert human_service.SESSION_ABSOLUTE_LIFETIME == timedelta(hours=8)
         assert persisted.expires_at == expected_expiry
         assert persisted.expires_at > persisted.created_at
+        assert persisted.last_activity_at == frozen_now
+        assert persisted.last_activity_at.tzinfo is not None
+        assert persisted.last_activity_at.utcoffset() == timedelta(0)
         assert persisted.expires_at.tzinfo is not None
         assert persisted.expires_at.utcoffset() == timedelta(0)
         assert persisted.token_digest == digest_session_token(token=created.token)
