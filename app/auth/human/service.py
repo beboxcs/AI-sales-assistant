@@ -26,6 +26,7 @@ from app.auth.human.session_repository import (
     find_user_session_by_token_digest_for_update,
     persist_user_session,
     refresh_user_session_activity,
+    revoke_user_session,
 )
 from app.auth.human.sessions import digest_session_token, generate_session_token
 from app.auth.human.types import (
@@ -223,7 +224,35 @@ def revoke_session(
     *,
     token: str,
 ) -> None:
-    raise NotImplementedError
+    if not isinstance(token, str) or not token.strip():
+        raise InvalidSessionError(_INVALID_SESSION_MESSAGE)
+
+    try:
+        token_digest = digest_session_token(token=token)
+    except (AttributeError, TypeError, UnicodeEncodeError):
+        raise InvalidSessionError(_INVALID_SESSION_MESSAGE) from None
+    except Exception:
+        raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
+
+    try:
+        with SessionLocal.begin() as session:
+            user_session = find_user_session_by_token_digest_for_update(
+                session,
+                token_digest=token_digest,
+            )
+            if user_session is None:
+                raise InvalidSessionError(_INVALID_SESSION_MESSAGE)
+
+            if user_session.revoked_at is None:
+                revoke_user_session(
+                    session,
+                    user_session=user_session,
+                    revoked_at=_utc_now(),
+                )
+    except InvalidSessionError:
+        raise
+    except Exception:
+        raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
 
 
 def _utc_now() -> datetime:

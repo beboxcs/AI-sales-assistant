@@ -184,17 +184,6 @@ def test_service_signatures_are_frozen():
     )
 
 
-@pytest.mark.parametrize(
-    ("service_function", "arguments"),
-    [
-        (revoke_session, {"token": "token"}),
-    ],
-)
-def test_service_placeholders_fail_closed(service_function, arguments):
-    with pytest.raises(NotImplementedError):
-        service_function(**arguments)
-
-
 def test_create_session_rejects_caller_supplied_expiration():
     principal = AuthenticatedPrincipal(
         1,

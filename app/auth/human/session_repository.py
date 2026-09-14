@@ -68,3 +68,13 @@ def refresh_user_session_activity(
 ) -> None:
     user_session.last_activity_at = last_activity_at
     session.flush()
+
+
+def revoke_user_session(
+    session: Session,
+    *,
+    user_session: UserSession,
+    revoked_at: datetime,
+) -> None:
+    user_session.revoked_at = revoked_at
+    session.flush()
