@@ -6,7 +6,15 @@ layer and must decide what an authenticated principal may do.
 
 from datetime import datetime, timedelta, timezone
 
-from app.auth.human.exceptions import AuthInfrastructureError
+from app.auth.human.exceptions import (
+    AuthInfrastructureError,
+    InvalidCredentialsError,
+)
+from app.auth.human.passwords import _DUMMY_PASSWORD_HASH, verify_password
+from app.auth.human.repository import (
+    find_active_memberships_for_user,
+    find_user_by_normalized_email,
+)
 from app.auth.human.session_repository import persist_user_session
 from app.auth.human.sessions import digest_session_token, generate_session_token
 from app.auth.human.types import (
@@ -15,8 +23,11 @@ from app.auth.human.types import (
     CreatedSession,
 )
 from app.database import SessionLocal
+from app.domain.enums import MembershipRole
+from app.domain.users import normalize_email
 
 SESSION_ABSOLUTE_LIFETIME = timedelta(hours=8)
+_INVALID_CREDENTIALS_MESSAGE = "Invalid credentials"
 _INFRASTRUCTURE_ERROR_MESSAGE = "Human authentication unavailable"
 
 
@@ -25,7 +36,57 @@ def authenticate_credentials(
     email: str,
     password: str,
 ) -> AuthenticatedPrincipal:
-    raise NotImplementedError
+    try:
+        try:
+            normalized_email = normalize_email(email)
+        except (AttributeError, TypeError, ValueError):
+            verify_password(password, _DUMMY_PASSWORD_HASH)
+            raise InvalidCredentialsError(
+                _INVALID_CREDENTIALS_MESSAGE
+            ) from None
+
+        with SessionLocal() as session:
+            user = find_user_by_normalized_email(
+                session,
+                normalized_email=normalized_email,
+            )
+            password_hash = (
+                user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
+            )
+            password_matches = verify_password(password, password_hash)
+
+            if user is None or user.is_active is not True or not password_matches:
+                raise InvalidCredentialsError(_INVALID_CREDENTIALS_MESSAGE)
+
+            active_memberships = [
+                membership
+                for membership in find_active_memberships_for_user(
+                    session,
+                    user_id=user.id,
+                )
+                if membership.is_active is True
+            ]
+            if len(active_memberships) != 1:
+                raise InvalidCredentialsError(_INVALID_CREDENTIALS_MESSAGE)
+
+            membership = active_memberships[0]
+            try:
+                role = MembershipRole(membership.role)
+            except (TypeError, ValueError):
+                raise AuthInfrastructureError(
+                    _INFRASTRUCTURE_ERROR_MESSAGE
+                ) from None
+
+            return AuthenticatedPrincipal(
+                user_id=user.id,
+                membership_id=membership.id,
+                company_id=membership.company_id,
+                role=role,
+            )
+    except InvalidCredentialsError:
+        raise
+    except Exception:
+        raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
 
 
 def create_session(
