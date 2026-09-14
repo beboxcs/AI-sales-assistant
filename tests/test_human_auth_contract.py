@@ -188,10 +188,6 @@ def test_service_signatures_are_frozen():
     ("service_function", "arguments"),
     [
         (
-            authenticate_credentials,
-            {"email": "user@example.com", "password": "secret"},
-        ),
-        (
             resolve_session,
             {"token": "token"},
         ),

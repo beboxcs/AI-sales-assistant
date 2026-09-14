@@ -195,6 +195,8 @@ def test_postgresql_session_row_persists_authoritative_identity_and_expiry(
     monkeypatch,
     postgres_session_engine,
 ):
+    frozen_now = datetime.now(timezone.utc)
+
     with Session(postgres_session_engine) as setup_session:
         company = Company(name="Session Company")
         user = User(
@@ -218,7 +220,7 @@ def test_postgresql_session_row_persists_authoritative_identity_and_expiry(
         )
         setup_session.commit()
 
-    monkeypatch.setattr(human_service, "_utc_now", lambda: NOW)
+    monkeypatch.setattr(human_service, "_utc_now", lambda: frozen_now)
     monkeypatch.setattr(
         human_service,
         "generate_session_token",
@@ -231,6 +233,7 @@ def test_postgresql_session_row_persists_authoritative_identity_and_expiry(
     )
 
     created = human_service.create_session(principal=principal)
+    expected_expiry = frozen_now + human_service.SESSION_ABSOLUTE_LIFETIME
 
     with Session(postgres_session_engine) as verification_session:
         persisted = verification_session.scalar(sa.select(UserSession))
@@ -240,7 +243,9 @@ def test_postgresql_session_row_persists_authoritative_identity_and_expiry(
         assert persisted.membership_id == principal.membership_id
         assert persisted.company_id == principal.company_id
         assert persisted.expires_at == created.expires_at
-        assert persisted.expires_at == NOW + timedelta(hours=8)
+        assert human_service.SESSION_ABSOLUTE_LIFETIME == timedelta(hours=8)
+        assert persisted.expires_at == expected_expiry
+        assert persisted.expires_at > persisted.created_at
         assert persisted.expires_at.tzinfo is not None
         assert persisted.expires_at.utcoffset() == timedelta(0)
         assert persisted.token_digest == digest_session_token(token=created.token)
