@@ -22,12 +22,15 @@ from app.auth.human.exceptions import (
     InvalidCsrfTokenError,
     InvalidCredentialsError,
     InvalidSessionError,
+    LoginRateLimitExceededError,
+    LoginRateLimitInfrastructureError,
 )
 from app.auth.human.service import (
     authenticate_credentials,
     create_session,
 )
 from app.auth.human.types import AuthenticatedPrincipal, CreatedSession
+from app.auth.human.types import LoginRateLimitPermit
 from app.domain.enums import MembershipRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -69,6 +72,21 @@ class HumanSessionRevocationService(Protocol):
     def revoke_session(self, *, token: str) -> None: ...
 
 
+class LoginRateLimitService(Protocol):
+    def check_login_rate_limit(
+        self,
+        *,
+        client_ip: str,
+        email: str,
+    ) -> LoginRateLimitPermit: ...
+
+    def record_login_failure(self, *, permit: LoginRateLimitPermit) -> None: ...
+
+    def record_login_success(self, *, permit: LoginRateLimitPermit) -> None: ...
+
+    def record_login_aborted(self, *, permit: LoginRateLimitPermit) -> None: ...
+
+
 class PublicHumanAuthService:
     def authenticate_credentials(
         self,
@@ -99,6 +117,29 @@ def get_human_session_revocation_service() -> HumanSessionRevocationService:
     return PublicHumanSessionRevocationService()
 
 
+class PublicLoginRateLimitService:
+    def check_login_rate_limit(
+        self,
+        *,
+        client_ip: str,
+        email: str,
+    ) -> LoginRateLimitPermit:
+        return human_auth.check_login_rate_limit(client_ip=client_ip, email=email)
+
+    def record_login_failure(self, *, permit: LoginRateLimitPermit) -> None:
+        human_auth.record_login_failure(permit=permit)
+
+    def record_login_success(self, *, permit: LoginRateLimitPermit) -> None:
+        human_auth.record_login_success(permit=permit)
+
+    def record_login_aborted(self, *, permit: LoginRateLimitPermit) -> None:
+        human_auth.record_login_aborted(permit=permit)
+
+
+def get_login_rate_limit_service() -> LoginRateLimitService:
+    return PublicLoginRateLimitService()
+
+
 @router.post(
     "/login",
     response_model=LoginResponse,
@@ -106,8 +147,12 @@ def get_human_session_revocation_service() -> HumanSessionRevocationService:
 )
 def login(
     request: LoginRequest,
+    http_request: Request,
     response: Response,
     human_auth_service: HumanAuthService = Depends(get_human_auth_service),
+    rate_limit_service: LoginRateLimitService = Depends(
+        get_login_rate_limit_service
+    ),
     raw_api_key: str | None = Header(default=None, alias="X-API-Key"),
     session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> LoginResponse:
@@ -116,14 +161,56 @@ def login(
         session_token=session_token,
     )
 
+    client_ip = _direct_client_ip(http_request)
+    try:
+        rate_limit_permit = rate_limit_service.check_login_rate_limit(
+            client_ip=client_ip,
+            email=request.email,
+        )
+    except LoginRateLimitExceededError as exc:
+        raise _login_rate_limited_error(
+            retry_after_seconds=exc.retry_after_seconds
+        ) from exc
+    except LoginRateLimitInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
     try:
         principal = human_auth_service.authenticate_credentials(
             email=request.email,
             password=request.password,
         )
-        created_session = human_auth_service.create_session(principal=principal)
     except InvalidCredentialsError as exc:
+        try:
+            rate_limit_service.record_login_failure(permit=rate_limit_permit)
+        except LoginRateLimitInfrastructureError as record_exc:
+            raise _human_auth_unavailable_error() from record_exc
+        except Exception as record_exc:
+            raise _human_auth_unavailable_error() from record_exc
         raise _invalid_credentials_error() from exc
+    except AuthInfrastructureError as exc:
+        _record_login_aborted_or_raise(
+            rate_limit_service=rate_limit_service,
+            permit=rate_limit_permit,
+        )
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        _record_login_aborted_or_raise(
+            rate_limit_service=rate_limit_service,
+            permit=rate_limit_permit,
+        )
+        raise _human_auth_unavailable_error() from exc
+
+    try:
+        rate_limit_service.record_login_success(permit=rate_limit_permit)
+    except LoginRateLimitInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+    try:
+        created_session = human_auth_service.create_session(principal=principal)
     except AuthInfrastructureError as exc:
         raise _human_auth_unavailable_error() from exc
     except Exception as exc:
@@ -253,6 +340,35 @@ def _invalid_csrf_token_error() -> APIError:
         status_code=403,
         code="INVALID_CSRF_TOKEN",
         message="Request verification failed",
+    )
+
+
+def _direct_client_ip(request: Request) -> str:
+    client = request.client
+    if client is None or not isinstance(client.host, str) or not client.host.strip():
+        raise _human_auth_unavailable_error()
+    return client.host
+
+
+def _record_login_aborted_or_raise(
+    *,
+    rate_limit_service: LoginRateLimitService,
+    permit: LoginRateLimitPermit,
+) -> None:
+    try:
+        rate_limit_service.record_login_aborted(permit=permit)
+    except LoginRateLimitInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+
+def _login_rate_limited_error(*, retry_after_seconds: int) -> APIError:
+    return APIError(
+        status_code=429,
+        code="LOGIN_RATE_LIMITED",
+        message="Too many login attempts. Please try again later.",
+        headers={"Retry-After": str(retry_after_seconds)},
     )
 
 

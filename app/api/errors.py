@@ -9,11 +9,13 @@ class APIError(Exception):
     status_code: int
     code: str
     message: str
+    headers: dict[str, str] | None = None
 
 
 async def api_error_handler(request: Request, exc: APIError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
+        headers=exc.headers,
         content={
             "error": {
                 "code": exc.code,
