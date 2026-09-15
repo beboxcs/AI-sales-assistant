@@ -10,6 +10,7 @@ from app.auth.human.exceptions import (
     InactiveMembershipError,
     InactiveUserError,
     InvalidCredentialsError,
+    InvalidCsrfTokenError,
     InvalidSessionError,
     SessionExpiredError,
     SessionRevokedError,
@@ -17,8 +18,10 @@ from app.auth.human.exceptions import (
 from app.auth.human.service import (
     authenticate_credentials,
     create_session,
+    issue_csrf_token,
     resolve_session,
     revoke_session,
+    verify_csrf_token,
 )
 from app.auth.human.types import (
     AuthenticatedPrincipal,
@@ -32,6 +35,7 @@ __all__ = [
     "CreatedSession",
     "HumanAuthError",
     "InvalidCredentialsError",
+    "InvalidCsrfTokenError",
     "InvalidSessionError",
     "SessionExpiredError",
     "SessionRevokedError",
@@ -40,6 +44,8 @@ __all__ = [
     "AuthInfrastructureError",
     "authenticate_credentials",
     "create_session",
+    "issue_csrf_token",
     "resolve_session",
     "revoke_session",
+    "verify_csrf_token",
 ]
