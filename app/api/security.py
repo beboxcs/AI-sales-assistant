@@ -2,17 +2,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 
-from fastapi import Depends, Request, Response, Security
+from fastapi import Depends, Header, Request, Response, Security
 from fastapi.security import APIKeyCookie, APIKeyHeader
 
 from app.api.errors import APIError
+from app.auth import human as human_auth
 from app.auth.contracts import TrustedTenantContext
 from app.auth.exceptions import AuthBackendError, InvalidApiCredentialError
 from app.auth.human.exceptions import (
     AuthInfrastructureError,
+    InvalidCsrfTokenError,
     InvalidSessionError,
 )
-from app.auth.human.service import resolve_session
 from app.auth.human.types import AuthenticatedUserContext
 from app.auth.service import authenticate_api_key
 from app.config import normalize_browser_origin, settings
@@ -57,7 +58,34 @@ class HumanSessionResolver(Protocol):
 
 class PublicHumanSessionResolver:
     def __call__(self, *, token: str) -> AuthenticatedUserContext:
-        return resolve_session(token=token)
+        return human_auth.resolve_session(token=token)
+
+
+class HumanCsrfService(Protocol):
+    def issue_csrf_token(self, *, session_token: str) -> str: ...
+
+    def verify_csrf_token(
+        self,
+        *,
+        session_token: str,
+        csrf_token: str,
+    ) -> None: ...
+
+
+class PublicHumanCsrfService:
+    def issue_csrf_token(self, *, session_token: str) -> str:
+        return human_auth.issue_csrf_token(session_token=session_token)
+
+    def verify_csrf_token(
+        self,
+        *,
+        session_token: str,
+        csrf_token: str,
+    ) -> None:
+        human_auth.verify_csrf_token(
+            session_token=session_token,
+            csrf_token=csrf_token,
+        )
 
 
 def get_human_session_resolver() -> HumanSessionResolver:
@@ -66,6 +94,10 @@ def get_human_session_resolver() -> HumanSessionResolver:
 
 def get_api_key_tenant_resolver() -> ApiKeyTenantResolver:
     return PublicApiKeyTenantResolver()
+
+
+def get_human_csrf_service() -> HumanCsrfService:
+    return PublicHumanCsrfService()
 
 
 def require_unambiguous_credentials(
@@ -169,6 +201,58 @@ def get_current_user(
         session_token=session_token,
         resolve_human_session=resolve_human_session,
     )
+
+
+def get_human_session_token(
+    request: Request,
+    session_token: str | None = Security(session_cookie),
+) -> str:
+    require_unambiguous_credentials(
+        raw_api_key=request.headers.get("x-api-key"),
+        session_token=session_token,
+    )
+    if session_token is None:
+        raise _authentication_required_error()
+    return session_token
+
+
+def get_trusted_human_session_token(
+    request: Request,
+    session_token: str = Depends(get_human_session_token),
+) -> str:
+    require_trusted_origin(request)
+    return session_token
+
+
+def require_valid_human_session_csrf(
+    request: Request,
+    session_token: str | None = Security(session_cookie),
+    csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
+    csrf_service: HumanCsrfService = Depends(get_human_csrf_service),
+) -> None:
+    require_unambiguous_credentials(
+        raw_api_key=request.headers.get("x-api-key"),
+        session_token=session_token,
+    )
+    if session_token is None:
+        raise _authentication_required_error()
+    require_trusted_origin(request)
+    if csrf_token is None:
+        raise _invalid_csrf_token_error()
+
+    try:
+        csrf_service.verify_csrf_token(
+            session_token=session_token,
+            csrf_token=csrf_token,
+        )
+    except InvalidCsrfTokenError as exc:
+        raise _invalid_csrf_token_error() from exc
+    except InvalidSessionError as exc:
+        raise _invalid_session_error() from exc
+    except AuthInfrastructureError as exc:
+        raise _auth_backend_error() from exc
+    except Exception as exc:
+        raise _auth_backend_error() from exc
 
 
 def _resolve_human_session_context(
@@ -340,6 +424,14 @@ def _forbidden_error() -> APIError:
         status_code=403,
         code="FORBIDDEN",
         message="You do not have permission to perform this action",
+    )
+
+
+def _invalid_csrf_token_error() -> APIError:
+    return APIError(
+        status_code=403,
+        code="INVALID_CSRF_TOKEN",
+        message="Request verification failed",
     )
 
 
