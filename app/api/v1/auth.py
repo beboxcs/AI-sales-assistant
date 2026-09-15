@@ -6,6 +6,9 @@ from pydantic import BaseModel, ConfigDict
 from app.api.errors import APIError
 from app.api.security import (
     SESSION_COOKIE_NAME,
+    HumanCsrfService,
+    get_human_csrf_service,
+    get_trusted_human_session_token,
     require_unambiguous_credentials,
     require_trusted_origin,
     set_session_cookie,
@@ -13,6 +16,7 @@ from app.api.security import (
 from app.auth.human.exceptions import (
     AuthInfrastructureError,
     InvalidCredentialsError,
+    InvalidSessionError,
 )
 from app.auth.human.service import (
     authenticate_credentials,
@@ -35,6 +39,10 @@ class LoginResponse(BaseModel):
     user_id: int
     company_id: int
     role: MembershipRole
+
+
+class CsrfTokenResponse(BaseModel):
+    csrf_token: str
 
 
 class HumanAuthService(Protocol):
@@ -116,11 +124,39 @@ def login(
     )
 
 
+@router.post(
+    "/csrf",
+    response_model=CsrfTokenResponse,
+)
+def issue_csrf_token(
+    session_token: str = Depends(get_trusted_human_session_token),
+    csrf_service: HumanCsrfService = Depends(get_human_csrf_service),
+) -> CsrfTokenResponse:
+    try:
+        csrf_token = csrf_service.issue_csrf_token(session_token=session_token)
+    except InvalidSessionError as exc:
+        raise _invalid_session_error() from exc
+    except AuthInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+    return CsrfTokenResponse(csrf_token=csrf_token)
+
+
 def _invalid_credentials_error() -> APIError:
     return APIError(
         status_code=401,
         code="INVALID_CREDENTIALS",
         message="Invalid email or password",
+    )
+
+
+def _invalid_session_error() -> APIError:
+    return APIError(
+        status_code=401,
+        code="INVALID_SESSION",
+        message="Invalid or unavailable session",
     )
 
 
