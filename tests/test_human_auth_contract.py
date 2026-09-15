@@ -11,6 +11,7 @@ from app.auth.human import (
     InactiveMembershipError,
     InactiveUserError,
     InvalidCredentialsError,
+    InvalidCsrfTokenError,
     InvalidSessionError,
     SessionExpiredError,
     SessionRevokedError,
@@ -18,8 +19,10 @@ from app.auth.human import (
 from app.auth.human.service import (
     authenticate_credentials,
     create_session,
+    issue_csrf_token,
     resolve_session,
     revoke_session,
+    verify_csrf_token,
 )
 from app.auth.human.types import (
     AuthenticatedPrincipal,
@@ -35,6 +38,7 @@ PUBLIC_NAMES = [
     "CreatedSession",
     "HumanAuthError",
     "InvalidCredentialsError",
+    "InvalidCsrfTokenError",
     "InvalidSessionError",
     "SessionExpiredError",
     "SessionRevokedError",
@@ -43,8 +47,10 @@ PUBLIC_NAMES = [
     "AuthInfrastructureError",
     "authenticate_credentials",
     "create_session",
+    "issue_csrf_token",
     "resolve_session",
     "revoke_session",
+    "verify_csrf_token",
 ]
 
 
@@ -112,6 +118,7 @@ def test_contract_dataclasses_have_exact_fields_and_are_frozen(
 def test_exception_hierarchy_is_exact():
     assert HumanAuthError.__bases__ == (Exception,)
     assert InvalidCredentialsError.__bases__ == (HumanAuthError,)
+    assert InvalidCsrfTokenError.__bases__ == (HumanAuthError,)
     assert InvalidSessionError.__bases__ == (HumanAuthError,)
     assert SessionExpiredError.__bases__ == (InvalidSessionError,)
     assert SessionRevokedError.__bases__ == (InvalidSessionError,)
@@ -125,6 +132,7 @@ def test_exception_hierarchy_is_exact():
     [
         (InactiveUserError, InvalidSessionError),
         (InactiveMembershipError, InvalidSessionError),
+        (InvalidCsrfTokenError, HumanAuthError),
         (AuthInfrastructureError, HumanAuthError),
     ],
 )
@@ -176,6 +184,31 @@ def test_service_signatures_are_frozen():
         [
             inspect.Parameter(
                 "token",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+        ],
+        return_annotation=None,
+    )
+    assert inspect.signature(issue_csrf_token) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "session_token",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+        ],
+        return_annotation=str,
+    )
+    assert inspect.signature(verify_csrf_token) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "session_token",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+            inspect.Parameter(
+                "csrf_token",
                 inspect.Parameter.KEYWORD_ONLY,
                 annotation=str,
             ),

@@ -9,6 +9,10 @@ class InvalidCredentialsError(HumanAuthError):
     """Raised when supplied human credentials are invalid."""
 
 
+class InvalidCsrfTokenError(HumanAuthError):
+    """Raised when a CSRF token cannot be validated."""
+
+
 class InvalidSessionError(HumanAuthError):
     """Raised when a session cannot establish an authenticated context."""
 

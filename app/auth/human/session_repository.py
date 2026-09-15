@@ -78,3 +78,13 @@ def revoke_user_session(
 ) -> None:
     user_session.revoked_at = revoked_at
     session.flush()
+
+
+def replace_user_session_csrf_digest(
+    session: Session,
+    *,
+    user_session: UserSession,
+    csrf_token_digest: bytes,
+) -> None:
+    user_session.csrf_token_digest = csrf_token_digest
+    session.flush()

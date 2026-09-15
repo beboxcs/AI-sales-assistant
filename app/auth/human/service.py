@@ -4,6 +4,9 @@ Authentication establishes trusted identity. Authorization remains a separate
 layer and must decide what an authenticated principal may do.
 """
 
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from app.auth.human.exceptions import (
@@ -11,6 +14,7 @@ from app.auth.human.exceptions import (
     InactiveMembershipError,
     InactiveUserError,
     InvalidCredentialsError,
+    InvalidCsrfTokenError,
     InvalidSessionError,
     SessionExpiredError,
     SessionRevokedError,
@@ -26,6 +30,7 @@ from app.auth.human.session_repository import (
     find_user_session_by_token_digest_for_update,
     persist_user_session,
     refresh_user_session_activity,
+    replace_user_session_csrf_digest,
     revoke_user_session,
 )
 from app.auth.human.sessions import digest_session_token, generate_session_token
@@ -41,8 +46,10 @@ from app.domain.users import normalize_email
 SESSION_ABSOLUTE_LIFETIME = timedelta(hours=8)
 SESSION_IDLE_TIMEOUT = timedelta(hours=2)
 _INVALID_CREDENTIALS_MESSAGE = "Invalid credentials"
+_INVALID_CSRF_TOKEN_MESSAGE = "Invalid CSRF token"
 _INVALID_SESSION_MESSAGE = "Invalid session"
 _INFRASTRUCTURE_ERROR_MESSAGE = "Human authentication unavailable"
+_DUMMY_CSRF_TOKEN_DIGEST = bytes(32)
 
 
 def authenticate_credentials(
@@ -253,6 +260,122 @@ def revoke_session(
         raise
     except Exception:
         raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
+
+
+def issue_csrf_token(
+    *,
+    session_token: str,
+) -> str:
+    session_token_digest = _derive_valid_session_token_digest(
+        session_token=session_token
+    )
+
+    try:
+        with SessionLocal.begin() as session:
+            user_session = find_user_session_by_token_digest_for_update(
+                session,
+                token_digest=session_token_digest,
+            )
+            if user_session is None:
+                raise InvalidSessionError(_INVALID_SESSION_MESSAGE)
+
+            _validate_csrf_session_lifecycle(user_session=user_session)
+            csrf_token = _generate_csrf_token()
+            csrf_token_digest = _digest_csrf_token(csrf_token=csrf_token)
+            replace_user_session_csrf_digest(
+                session,
+                user_session=user_session,
+                csrf_token_digest=csrf_token_digest,
+            )
+    except InvalidSessionError:
+        raise
+    except Exception:
+        raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
+
+    return csrf_token
+
+
+def verify_csrf_token(
+    *,
+    session_token: str,
+    csrf_token: str,
+) -> None:
+    session_token_digest = _derive_valid_session_token_digest(
+        session_token=session_token
+    )
+    csrf_token_digest = _derive_valid_csrf_token_digest(csrf_token=csrf_token)
+
+    try:
+        with SessionLocal.begin() as session:
+            user_session = find_user_session_by_token_digest_for_update(
+                session,
+                token_digest=session_token_digest,
+            )
+            if user_session is None:
+                raise InvalidSessionError(_INVALID_SESSION_MESSAGE)
+
+            _validate_csrf_session_lifecycle(user_session=user_session)
+            try:
+                stored_digest = user_session.csrf_token_digest
+                comparison_digest = (
+                    stored_digest
+                    if stored_digest is not None
+                    else _DUMMY_CSRF_TOKEN_DIGEST
+                )
+                token_matches = hmac.compare_digest(
+                    comparison_digest,
+                    csrf_token_digest,
+                )
+            except (TypeError, ValueError):
+                token_matches = False
+            if stored_digest is None or not token_matches:
+                raise InvalidCsrfTokenError(_INVALID_CSRF_TOKEN_MESSAGE)
+    except (InvalidSessionError, InvalidCsrfTokenError):
+        raise
+    except Exception:
+        raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
+
+
+def _derive_valid_session_token_digest(*, session_token: str) -> bytes:
+    if not isinstance(session_token, str) or not session_token.strip():
+        raise InvalidSessionError(_INVALID_SESSION_MESSAGE)
+
+    try:
+        return digest_session_token(token=session_token)
+    except (AttributeError, TypeError, UnicodeEncodeError):
+        raise InvalidSessionError(_INVALID_SESSION_MESSAGE) from None
+    except Exception:
+        raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
+
+
+def _derive_valid_csrf_token_digest(*, csrf_token: str) -> bytes:
+    if not isinstance(csrf_token, str) or not csrf_token.strip():
+        raise InvalidCsrfTokenError(_INVALID_CSRF_TOKEN_MESSAGE)
+
+    try:
+        return _digest_csrf_token(csrf_token=csrf_token)
+    except (AttributeError, TypeError, UnicodeEncodeError):
+        raise InvalidCsrfTokenError(_INVALID_CSRF_TOKEN_MESSAGE) from None
+    except Exception:
+        raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
+
+
+def _validate_csrf_session_lifecycle(*, user_session) -> None:
+    if user_session.revoked_at is not None:
+        raise SessionRevokedError(_INVALID_SESSION_MESSAGE)
+    now = _utc_now()
+    if now >= user_session.expires_at:
+        raise SessionExpiredError(_INVALID_SESSION_MESSAGE)
+    if now >= user_session.last_activity_at + SESSION_IDLE_TIMEOUT:
+        raise SessionExpiredError(_INVALID_SESSION_MESSAGE)
+
+
+def _generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _digest_csrf_token(*, csrf_token: str) -> bytes:
+    return hashlib.sha256(csrf_token.encode("ascii")).digest()
 
 
 def _utc_now() -> datetime:
