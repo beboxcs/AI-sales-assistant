@@ -7,6 +7,11 @@ from app.domain.enums import MembershipRole
 
 
 @dataclass(frozen=True)
+class LoginRateLimitPermit:
+    attempt_id: str
+
+
+@dataclass(frozen=True)
 class AuthenticatedPrincipal:
     user_id: int
     membership_id: int

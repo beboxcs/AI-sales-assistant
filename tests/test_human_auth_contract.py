@@ -13,8 +13,16 @@ from app.auth.human import (
     InvalidCredentialsError,
     InvalidCsrfTokenError,
     InvalidSessionError,
+    LoginRateLimitExceededError,
+    LoginRateLimitInfrastructureError,
     SessionExpiredError,
     SessionRevokedError,
+)
+from app.auth.human.login_rate_limit import (
+    check_login_rate_limit,
+    record_login_aborted,
+    record_login_failure,
+    record_login_success,
 )
 from app.auth.human.service import (
     authenticate_credentials,
@@ -28,6 +36,7 @@ from app.auth.human.types import (
     AuthenticatedPrincipal,
     AuthenticatedUserContext,
     CreatedSession,
+    LoginRateLimitPermit,
 )
 from app.domain.enums import MembershipRole
 
@@ -36,10 +45,13 @@ PUBLIC_NAMES = [
     "AuthenticatedPrincipal",
     "AuthenticatedUserContext",
     "CreatedSession",
+    "LoginRateLimitPermit",
     "HumanAuthError",
     "InvalidCredentialsError",
     "InvalidCsrfTokenError",
     "InvalidSessionError",
+    "LoginRateLimitExceededError",
+    "LoginRateLimitInfrastructureError",
     "SessionExpiredError",
     "SessionRevokedError",
     "InactiveUserError",
@@ -51,6 +63,10 @@ PUBLIC_NAMES = [
     "resolve_session",
     "revoke_session",
     "verify_csrf_token",
+    "check_login_rate_limit",
+    "record_login_aborted",
+    "record_login_failure",
+    "record_login_success",
 ]
 
 
@@ -84,6 +100,10 @@ PUBLIC_NAMES = [
                 ("context", AuthenticatedUserContext),
             ],
         ),
+        (
+            LoginRateLimitPermit,
+            [("attempt_id", str)],
+        ),
     ],
 )
 def test_contract_dataclasses_have_exact_fields_and_are_frozen(
@@ -110,6 +130,7 @@ def test_contract_dataclasses_have_exact_fields_and_are_frozen(
             datetime(2026, 9, 11, tzinfo=timezone.utc),
             context,
         ),
+        LoginRateLimitPermit: LoginRateLimitPermit("attempt-id"),
     }
     with pytest.raises(FrozenInstanceError):
         instances[contract_type].user_id = 99
@@ -120,6 +141,8 @@ def test_exception_hierarchy_is_exact():
     assert InvalidCredentialsError.__bases__ == (HumanAuthError,)
     assert InvalidCsrfTokenError.__bases__ == (HumanAuthError,)
     assert InvalidSessionError.__bases__ == (HumanAuthError,)
+    assert LoginRateLimitExceededError.__bases__ == (HumanAuthError,)
+    assert LoginRateLimitInfrastructureError.__bases__ == (HumanAuthError,)
     assert SessionExpiredError.__bases__ == (InvalidSessionError,)
     assert SessionRevokedError.__bases__ == (InvalidSessionError,)
     assert InactiveUserError.__bases__ == (InvalidSessionError,)
@@ -133,6 +156,7 @@ def test_exception_hierarchy_is_exact():
         (InactiveUserError, InvalidSessionError),
         (InactiveMembershipError, InvalidSessionError),
         (InvalidCsrfTokenError, HumanAuthError),
+        (LoginRateLimitInfrastructureError, HumanAuthError),
         (AuthInfrastructureError, HumanAuthError),
     ],
 )
@@ -142,6 +166,11 @@ def test_new_public_errors_are_catchable_by_their_contract_base(
 ):
     with pytest.raises(catch_type):
         raise error_type
+
+
+def test_login_rate_limit_exceeded_error_is_catchable_by_human_auth_error():
+    with pytest.raises(HumanAuthError):
+        raise LoginRateLimitExceededError(retry_after_seconds=1)
 
 
 def test_service_signatures_are_frozen():
@@ -211,6 +240,51 @@ def test_service_signatures_are_frozen():
                 "csrf_token",
                 inspect.Parameter.KEYWORD_ONLY,
                 annotation=str,
+            ),
+        ],
+        return_annotation=None,
+    )
+    assert inspect.signature(check_login_rate_limit) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "client_ip",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+            inspect.Parameter(
+                "email",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+        ],
+        return_annotation=LoginRateLimitPermit,
+    )
+    assert inspect.signature(record_login_failure) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "permit",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=LoginRateLimitPermit,
+            ),
+        ],
+        return_annotation=None,
+    )
+    assert inspect.signature(record_login_aborted) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "permit",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=LoginRateLimitPermit,
+            ),
+        ],
+        return_annotation=None,
+    )
+    assert inspect.signature(record_login_success) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "permit",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=LoginRateLimitPermit,
             ),
         ],
         return_annotation=None,

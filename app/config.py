@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     DEV_COMPANY_ID: int | None = None
     INVENTORY_INGEST_MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     TRUSTED_BROWSER_ORIGINS: tuple[str, ...] = ()
+    LOGIN_RATE_LIMIT_BACKEND: str | None = None
 
     @field_validator("TRUSTED_BROWSER_ORIGINS", mode="before")
     @classmethod

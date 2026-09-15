@@ -28,6 +28,17 @@ def test_test_config_allows_dependency_override_style_configuration():
 
     assert settings.APP_ENV == "test"
     assert settings.DEV_COMPANY_ID == 42
+    assert settings.LOGIN_RATE_LIMIT_BACKEND is None
+
+
+def test_login_rate_limit_backend_loads_from_environment(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("LOGIN_RATE_LIMIT_BACKEND", "memory")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.LOGIN_RATE_LIMIT_BACKEND == "memory"
 
 
 def test_trusted_browser_origins_are_normalized():
