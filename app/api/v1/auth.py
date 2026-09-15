@@ -1,20 +1,25 @@
 from typing import Protocol
 
-from fastapi import APIRouter, Cookie, Depends, Header, Response
+from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, Security
 from pydantic import BaseModel, ConfigDict
+from starlette.status import HTTP_204_NO_CONTENT
 
 from app.api.errors import APIError
 from app.api.security import (
     SESSION_COOKIE_NAME,
     HumanCsrfService,
+    clear_session_cookie,
     get_human_csrf_service,
     get_trusted_human_session_token,
-    require_unambiguous_credentials,
     require_trusted_origin,
+    require_unambiguous_credentials,
+    session_cookie,
     set_session_cookie,
 )
+from app.auth import human as human_auth
 from app.auth.human.exceptions import (
     AuthInfrastructureError,
+    InvalidCsrfTokenError,
     InvalidCredentialsError,
     InvalidSessionError,
 )
@@ -60,6 +65,10 @@ class HumanAuthService(Protocol):
     ) -> CreatedSession: ...
 
 
+class HumanSessionRevocationService(Protocol):
+    def revoke_session(self, *, token: str) -> None: ...
+
+
 class PublicHumanAuthService:
     def authenticate_credentials(
         self,
@@ -79,6 +88,15 @@ class PublicHumanAuthService:
 
 def get_human_auth_service() -> HumanAuthService:
     return PublicHumanAuthService()
+
+
+class PublicHumanSessionRevocationService:
+    def revoke_session(self, *, token: str) -> None:
+        human_auth.revoke_session(token=token)
+
+
+def get_human_session_revocation_service() -> HumanSessionRevocationService:
+    return PublicHumanSessionRevocationService()
 
 
 @router.post(
@@ -144,6 +162,68 @@ def issue_csrf_token(
     return CsrfTokenResponse(csrf_token=csrf_token)
 
 
+@router.post(
+    "/logout",
+    status_code=HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def logout(
+    request: Request,
+    response: Response,
+    session_token: str | None = Security(session_cookie),
+    csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
+    csrf_service: HumanCsrfService = Depends(get_human_csrf_service),
+    revocation_service: HumanSessionRevocationService = Depends(
+        get_human_session_revocation_service
+    ),
+) -> Response:
+    raw_api_key = request.headers.get("x-api-key")
+    require_unambiguous_credentials(
+        raw_api_key=raw_api_key,
+        session_token=session_token,
+    )
+
+    if session_token is None:
+        if raw_api_key is not None:
+            raise _authentication_required_error()
+        clear_session_cookie(response)
+        response.status_code = HTTP_204_NO_CONTENT
+        return response
+
+    require_trusted_origin(request)
+    if csrf_token is None:
+        raise _invalid_csrf_token_error()
+
+    try:
+        csrf_service.verify_csrf_token(
+            session_token=session_token,
+            csrf_token=csrf_token,
+        )
+    except InvalidCsrfTokenError as exc:
+        raise _invalid_csrf_token_error() from exc
+    except InvalidSessionError:
+        clear_session_cookie(response)
+        response.status_code = HTTP_204_NO_CONTENT
+        return response
+    except AuthInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+    try:
+        revocation_service.revoke_session(token=session_token)
+    except InvalidSessionError:
+        pass
+    except AuthInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+    clear_session_cookie(response)
+    response.status_code = HTTP_204_NO_CONTENT
+    return response
+
+
 def _invalid_credentials_error() -> APIError:
     return APIError(
         status_code=401,
@@ -157,6 +237,22 @@ def _invalid_session_error() -> APIError:
         status_code=401,
         code="INVALID_SESSION",
         message="Invalid or unavailable session",
+    )
+
+
+def _authentication_required_error() -> APIError:
+    return APIError(
+        status_code=401,
+        code="AUTHENTICATION_REQUIRED",
+        message="Authentication is required",
+    )
+
+
+def _invalid_csrf_token_error() -> APIError:
+    return APIError(
+        status_code=403,
+        code="INVALID_CSRF_TOKEN",
+        message="Request verification failed",
     )
 
 
