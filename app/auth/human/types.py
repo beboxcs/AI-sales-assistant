@@ -12,6 +12,24 @@ class LoginRateLimitPermit:
 
 
 @dataclass(frozen=True)
+class CreatedInvitation:
+    invitation_id: int
+    company_id: int
+    normalized_email: str
+    role: MembershipRole
+    token: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class AcceptedInvitation:
+    user_id: int
+    company_id: int
+    membership_id: int
+    role: MembershipRole
+
+
+@dataclass(frozen=True)
 class AuthenticatedPrincipal:
     user_id: int
     membership_id: int

@@ -27,6 +27,30 @@ class LoginRateLimitInfrastructureError(HumanAuthError):
     """Raised when login rate limiting cannot safely complete."""
 
 
+class InvitationError(HumanAuthError):
+    """Base error for company invitation operations."""
+
+
+class InvalidInvitationError(InvitationError):
+    """Raised when an invitation token is unusable."""
+
+
+class InvitationAuthorizationError(InvitationError):
+    """Raised when an invitation creator is not authorized."""
+
+
+class InvitationConflictError(InvitationError):
+    """Raised when persisted identity state conflicts with an invitation."""
+
+
+class InvalidInvitationPasswordError(InvitationError):
+    """Raised when a new invited user's password fails policy."""
+
+
+class InvitationInfrastructureError(InvitationError):
+    """Raised when invitation infrastructure cannot safely complete."""
+
+
 class InvalidSessionError(HumanAuthError):
     """Raised when a session cannot establish an authenticated context."""
 
