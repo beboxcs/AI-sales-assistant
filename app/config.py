@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     INVENTORY_INGEST_MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     TRUSTED_BROWSER_ORIGINS: tuple[str, ...] = ()
     LOGIN_RATE_LIMIT_BACKEND: str | None = None
+    INVITATION_DELIVERY_BACKEND: str | None = None
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int | None = None
+    SMTP_FROM_EMAIL: str | None = None
+    INVITATION_ACCEPT_BASE_URL: str | None = None
 
     @field_validator("TRUSTED_BROWSER_ORIGINS", mode="before")
     @classmethod
@@ -79,6 +84,36 @@ class Settings(BaseSettings):
             if any(origin == "*" for origin in self.TRUSTED_BROWSER_ORIGINS):
                 raise ValueError(
                     "TRUSTED_BROWSER_ORIGINS must not contain wildcard origins"
+                )
+            if self.INVITATION_DELIVERY_BACKEND != "smtp":
+                raise ValueError(
+                    "INVITATION_DELIVERY_BACKEND=smtp is required outside local/test"
+                )
+            if self.SMTP_HOST is None or not self.SMTP_HOST.strip():
+                raise ValueError("SMTP_HOST is required outside local/test")
+            if self.SMTP_HOST.strip().lower() in {"mailpit", "localhost", "127.0.0.1"}:
+                raise ValueError(
+                    "SMTP_HOST must not use development-only hosts outside local/test"
+                )
+            if self.SMTP_PORT is None or self.SMTP_PORT <= 0:
+                raise ValueError("SMTP_PORT is required outside local/test")
+            if self.SMTP_FROM_EMAIL is None or not self.SMTP_FROM_EMAIL.strip():
+                raise ValueError("SMTP_FROM_EMAIL is required outside local/test")
+            if (
+                self.INVITATION_ACCEPT_BASE_URL is None
+                or not self.INVITATION_ACCEPT_BASE_URL.strip()
+            ):
+                raise ValueError(
+                    "INVITATION_ACCEPT_BASE_URL is required outside local/test"
+                )
+            parsed_accept_url = urlsplit(self.INVITATION_ACCEPT_BASE_URL.strip())
+            if parsed_accept_url.scheme != "https" or not parsed_accept_url.netloc:
+                raise ValueError(
+                    "INVITATION_ACCEPT_BASE_URL must be an https URL outside local/test"
+                )
+            if parsed_accept_url.hostname in {"localhost", "127.0.0.1"}:
+                raise ValueError(
+                    "INVITATION_ACCEPT_BASE_URL must not use development hosts outside local/test"
                 )
         return self
 

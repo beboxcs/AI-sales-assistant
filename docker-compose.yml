@@ -24,8 +24,21 @@ services:
       - APP_ENV=local
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/real_estate_db
       - DEV_COMPANY_ID=1
+      - INVITATION_DELIVERY_BACKEND=smtp
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
+      - SMTP_FROM_EMAIL=invites@local.real-estate-ai.test
+      - INVITATION_ACCEPT_BASE_URL=http://localhost:3000/invitations/accept
     depends_on:
       - db
+      - mailpit
+
+  mailpit:
+    image: axllent/mailpit:v1.21.7
+    container_name: real_estate_mailpit
+    restart: always
+    ports:
+      - "8025:8025"
 
 volumes:
   postgres_data:
