@@ -19,8 +19,12 @@ from app.api.security import (
 from app.auth import human as human_auth
 from app.auth.human.exceptions import (
     AuthInfrastructureError,
+    InvitationConflictError,
+    InvitationInfrastructureError,
     InvalidCsrfTokenError,
     InvalidCredentialsError,
+    InvalidInvitationError,
+    InvalidInvitationPasswordError,
     InvalidSessionError,
     LoginRateLimitExceededError,
     LoginRateLimitInfrastructureError,
@@ -29,7 +33,11 @@ from app.auth.human.service import (
     authenticate_credentials,
     create_session,
 )
-from app.auth.human.types import AuthenticatedPrincipal, CreatedSession
+from app.auth.human.types import (
+    AcceptedInvitation,
+    AuthenticatedPrincipal,
+    CreatedSession,
+)
 from app.auth.human.types import LoginRateLimitPermit
 from app.domain.enums import MembershipRole
 
@@ -51,6 +59,20 @@ class LoginResponse(BaseModel):
 
 class CsrfTokenResponse(BaseModel):
     csrf_token: str
+
+
+class AcceptInvitationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+    password: str
+
+
+class AcceptInvitationResponse(BaseModel):
+    user_id: int
+    company_id: int
+    membership_id: int
+    role: MembershipRole
 
 
 class HumanAuthService(Protocol):
@@ -85,6 +107,15 @@ class LoginRateLimitService(Protocol):
     def record_login_success(self, *, permit: LoginRateLimitPermit) -> None: ...
 
     def record_login_aborted(self, *, permit: LoginRateLimitPermit) -> None: ...
+
+
+class InvitationAcceptanceService(Protocol):
+    def accept_invitation(
+        self,
+        *,
+        token: str,
+        password: str,
+    ) -> AcceptedInvitation: ...
 
 
 class PublicHumanAuthService:
@@ -138,6 +169,20 @@ class PublicLoginRateLimitService:
 
 def get_login_rate_limit_service() -> LoginRateLimitService:
     return PublicLoginRateLimitService()
+
+
+class PublicInvitationAcceptanceService:
+    def accept_invitation(
+        self,
+        *,
+        token: str,
+        password: str,
+    ) -> AcceptedInvitation:
+        return human_auth.accept_invitation(token=token, password=password)
+
+
+def get_invitation_acceptance_service() -> InvitationAcceptanceService:
+    return PublicInvitationAcceptanceService()
 
 
 @router.post(
@@ -247,6 +292,49 @@ def issue_csrf_token(
         raise _human_auth_unavailable_error() from exc
 
     return CsrfTokenResponse(csrf_token=csrf_token)
+
+
+@router.post(
+    "/invitations/accept",
+    response_model=AcceptInvitationResponse,
+)
+def accept_invitation(
+    request: AcceptInvitationRequest,
+    http_request: Request,
+    invitation_service: InvitationAcceptanceService = Depends(
+        get_invitation_acceptance_service
+    ),
+    raw_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> AcceptInvitationResponse:
+    require_unambiguous_credentials(
+        raw_api_key=raw_api_key,
+        session_token=session_token,
+    )
+    require_trusted_origin(http_request)
+
+    try:
+        accepted = invitation_service.accept_invitation(
+            token=request.token,
+            password=request.password,
+        )
+    except InvalidInvitationPasswordError as exc:
+        raise _invalid_invitation_password_error() from exc
+    except InvalidInvitationError as exc:
+        raise _invalid_invitation_error() from exc
+    except InvitationConflictError as exc:
+        raise _accept_invitation_conflict_error() from exc
+    except InvitationInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+    return AcceptInvitationResponse(
+        user_id=accepted.user_id,
+        company_id=accepted.company_id,
+        membership_id=accepted.membership_id,
+        role=accepted.role,
+    )
 
 
 @router.post(
@@ -369,6 +457,30 @@ def _login_rate_limited_error(*, retry_after_seconds: int) -> APIError:
         code="LOGIN_RATE_LIMITED",
         message="Too many login attempts. Please try again later.",
         headers={"Retry-After": str(retry_after_seconds)},
+    )
+
+
+def _invalid_invitation_error() -> APIError:
+    return APIError(
+        status_code=400,
+        code="INVALID_INVITATION",
+        message="Invitation is invalid or unavailable",
+    )
+
+
+def _invalid_invitation_password_error() -> APIError:
+    return APIError(
+        status_code=422,
+        code="INVALID_INVITATION_PASSWORD",
+        message="Invitation password is invalid",
+    )
+
+
+def _accept_invitation_conflict_error() -> APIError:
+    return APIError(
+        status_code=409,
+        code="INVITATION_CONFLICT",
+        message="Invitation could not be accepted",
     )
 
 
