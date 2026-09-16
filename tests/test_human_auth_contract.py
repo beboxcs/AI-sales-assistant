@@ -6,17 +6,28 @@ import pytest
 
 import app.auth.human as human_auth
 from app.auth.human import (
+    AcceptedInvitation,
     AuthInfrastructureError,
     HumanAuthError,
     InactiveMembershipError,
     InactiveUserError,
+    InvitationAuthorizationError,
+    InvitationConflictError,
+    InvitationError,
+    InvitationInfrastructureError,
     InvalidCredentialsError,
     InvalidCsrfTokenError,
+    InvalidInvitationError,
+    InvalidInvitationPasswordError,
     InvalidSessionError,
     LoginRateLimitExceededError,
     LoginRateLimitInfrastructureError,
     SessionExpiredError,
     SessionRevokedError,
+)
+from app.auth.human.invitation_service import (
+    accept_invitation,
+    create_invitation,
 )
 from app.auth.human.login_rate_limit import (
     check_login_rate_limit,
@@ -35,6 +46,7 @@ from app.auth.human.service import (
 from app.auth.human.types import (
     AuthenticatedPrincipal,
     AuthenticatedUserContext,
+    CreatedInvitation,
     CreatedSession,
     LoginRateLimitPermit,
 )
@@ -42,11 +54,19 @@ from app.domain.enums import MembershipRole
 
 
 PUBLIC_NAMES = [
+    "AcceptedInvitation",
     "AuthenticatedPrincipal",
     "AuthenticatedUserContext",
+    "CreatedInvitation",
     "CreatedSession",
     "LoginRateLimitPermit",
     "HumanAuthError",
+    "InvitationError",
+    "InvalidInvitationError",
+    "InvitationAuthorizationError",
+    "InvitationConflictError",
+    "InvalidInvitationPasswordError",
+    "InvitationInfrastructureError",
     "InvalidCredentialsError",
     "InvalidCsrfTokenError",
     "InvalidSessionError",
@@ -57,8 +77,10 @@ PUBLIC_NAMES = [
     "InactiveUserError",
     "InactiveMembershipError",
     "AuthInfrastructureError",
+    "accept_invitation",
     "authenticate_credentials",
     "create_session",
+    "create_invitation",
     "issue_csrf_token",
     "resolve_session",
     "revoke_session",
@@ -73,6 +95,26 @@ PUBLIC_NAMES = [
 @pytest.mark.parametrize(
     ("contract_type", "expected_fields"),
     [
+        (
+            CreatedInvitation,
+            [
+                ("invitation_id", int),
+                ("company_id", int),
+                ("normalized_email", str),
+                ("role", MembershipRole),
+                ("token", str),
+                ("expires_at", datetime),
+            ],
+        ),
+        (
+            AcceptedInvitation,
+            [
+                ("user_id", int),
+                ("company_id", int),
+                ("membership_id", int),
+                ("role", MembershipRole),
+            ],
+        ),
         (
             AuthenticatedPrincipal,
             [
@@ -123,6 +165,20 @@ def test_contract_dataclasses_have_exact_fields_and_are_frozen(
         4,
     )
     instances = {
+        CreatedInvitation: CreatedInvitation(
+            10,
+            3,
+            "user@example.com",
+            MembershipRole.SALESPERSON,
+            "token",
+            datetime(2026, 9, 11, tzinfo=timezone.utc),
+        ),
+        AcceptedInvitation: AcceptedInvitation(
+            1,
+            3,
+            2,
+            MembershipRole.SALESPERSON,
+        ),
         AuthenticatedPrincipal: principal,
         AuthenticatedUserContext: context,
         CreatedSession: CreatedSession(
@@ -138,6 +194,12 @@ def test_contract_dataclasses_have_exact_fields_and_are_frozen(
 
 def test_exception_hierarchy_is_exact():
     assert HumanAuthError.__bases__ == (Exception,)
+    assert InvitationError.__bases__ == (HumanAuthError,)
+    assert InvalidInvitationError.__bases__ == (InvitationError,)
+    assert InvitationAuthorizationError.__bases__ == (InvitationError,)
+    assert InvitationConflictError.__bases__ == (InvitationError,)
+    assert InvalidInvitationPasswordError.__bases__ == (InvitationError,)
+    assert InvitationInfrastructureError.__bases__ == (InvitationError,)
     assert InvalidCredentialsError.__bases__ == (HumanAuthError,)
     assert InvalidCsrfTokenError.__bases__ == (HumanAuthError,)
     assert InvalidSessionError.__bases__ == (HumanAuthError,)
@@ -155,6 +217,11 @@ def test_exception_hierarchy_is_exact():
     [
         (InactiveUserError, InvalidSessionError),
         (InactiveMembershipError, InvalidSessionError),
+        (InvalidInvitationError, InvitationError),
+        (InvitationAuthorizationError, InvitationError),
+        (InvitationConflictError, InvitationError),
+        (InvalidInvitationPasswordError, InvitationError),
+        (InvitationInfrastructureError, InvitationError),
         (InvalidCsrfTokenError, HumanAuthError),
         (LoginRateLimitInfrastructureError, HumanAuthError),
         (AuthInfrastructureError, HumanAuthError),
@@ -174,6 +241,46 @@ def test_login_rate_limit_exceeded_error_is_catchable_by_human_auth_error():
 
 
 def test_service_signatures_are_frozen():
+    assert inspect.signature(create_invitation) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "company_id",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=int,
+            ),
+            inspect.Parameter(
+                "created_by_user_id",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=int,
+            ),
+            inspect.Parameter(
+                "email",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+            inspect.Parameter(
+                "role",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=MembershipRole,
+            ),
+        ],
+        return_annotation=CreatedInvitation,
+    )
+    assert inspect.signature(accept_invitation) == inspect.Signature(
+        [
+            inspect.Parameter(
+                "token",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+            inspect.Parameter(
+                "password",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+            ),
+        ],
+        return_annotation=AcceptedInvitation,
+    )
     assert inspect.signature(authenticate_credentials) == inspect.Signature(
         [
             inspect.Parameter(

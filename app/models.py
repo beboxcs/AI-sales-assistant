@@ -54,6 +54,9 @@ class Company(Base):
     memberships: Mapped[list[CompanyMembership]] = relationship(
         back_populates="company"
     )
+    invitations: Mapped[list[CompanyInvitation]] = relationship(
+        back_populates="company"
+    )
 
 
 class ApiCredential(Base):
@@ -152,6 +155,9 @@ class User(Base):
     memberships: Mapped[list[CompanyMembership]] = relationship(
         back_populates="user"
     )
+    created_invitations: Mapped[list[CompanyInvitation]] = relationship(
+        back_populates="created_by_user"
+    )
 
     # Human identity writes are supported through this ORM boundary. Direct
     # SQL/Core writes bypass normalization and are not an application write path;
@@ -159,6 +165,88 @@ class User(Base):
     @validates("normalized_email")
     def normalize_normalized_email(self, _key: str, value: str) -> str:
         return normalize_email(value)
+
+
+class CompanyInvitation(Base):
+    __tablename__ = "company_invitations"
+    __table_args__ = (
+        UniqueConstraint(
+            "token_digest",
+            name="uq_company_invitations_token_digest",
+        ),
+        CheckConstraint(
+            "normalized_email ~ '[^[:space:]]'",
+            name="ck_company_invitations_email_not_blank",
+        ),
+        CheckConstraint(
+            "role IN ('salesperson', 'company_admin')",
+            name="ck_company_invitations_role_allowed",
+        ),
+        CheckConstraint(
+            "octet_length(token_digest) = 32",
+            name="ck_company_invitations_token_digest_sha256_length",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="ck_company_invitations_expiration_after_creation",
+        ),
+        CheckConstraint(
+            "consumed_at IS NULL OR revoked_at IS NULL",
+            name="ck_company_invitations_single_terminal_state",
+        ),
+        CheckConstraint(
+            "consumed_at IS NULL OR consumed_at >= created_at",
+            name="ck_company_invitations_consumed_after_creation",
+        ),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= created_at",
+            name="ck_company_invitations_revoked_after_creation",
+        ),
+        Index(
+            "ix_company_invitations_company_email",
+            "company_id",
+            "normalized_email",
+        ),
+        Index("ix_company_invitations_created_by_user_id", "created_by_user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "companies.id",
+            name="fk_company_invitations_company",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    normalized_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    created_by_user_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "users.id",
+            name="fk_company_invitations_creator",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    company: Mapped[Company] = relationship(back_populates="invitations")
+    created_by_user: Mapped[User] = relationship(
+        back_populates="created_invitations"
+    )
 
 
 class CompanyMembership(Base):

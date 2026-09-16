@@ -9,13 +9,23 @@ from app.auth.human.exceptions import (
     HumanAuthError,
     InactiveMembershipError,
     InactiveUserError,
+    InvitationAuthorizationError,
+    InvitationConflictError,
+    InvitationError,
+    InvitationInfrastructureError,
     InvalidCredentialsError,
     InvalidCsrfTokenError,
+    InvalidInvitationError,
+    InvalidInvitationPasswordError,
     InvalidSessionError,
     LoginRateLimitExceededError,
     LoginRateLimitInfrastructureError,
     SessionExpiredError,
     SessionRevokedError,
+)
+from app.auth.human.invitation_service import (
+    accept_invitation,
+    create_invitation,
 )
 from app.auth.human.service import (
     authenticate_credentials,
@@ -32,18 +42,28 @@ from app.auth.human.login_rate_limit import (
     record_login_success,
 )
 from app.auth.human.types import (
+    AcceptedInvitation,
     AuthenticatedPrincipal,
     AuthenticatedUserContext,
+    CreatedInvitation,
     CreatedSession,
     LoginRateLimitPermit,
 )
 
 __all__ = [
+    "AcceptedInvitation",
     "AuthenticatedPrincipal",
     "AuthenticatedUserContext",
+    "CreatedInvitation",
     "CreatedSession",
     "LoginRateLimitPermit",
     "HumanAuthError",
+    "InvitationError",
+    "InvalidInvitationError",
+    "InvitationAuthorizationError",
+    "InvitationConflictError",
+    "InvalidInvitationPasswordError",
+    "InvitationInfrastructureError",
     "InvalidCredentialsError",
     "InvalidCsrfTokenError",
     "InvalidSessionError",
@@ -54,8 +74,10 @@ __all__ = [
     "InactiveUserError",
     "InactiveMembershipError",
     "AuthInfrastructureError",
+    "accept_invitation",
     "authenticate_credentials",
     "create_session",
+    "create_invitation",
     "issue_csrf_token",
     "resolve_session",
     "revoke_session",
