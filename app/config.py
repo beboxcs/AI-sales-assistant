@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     SMTP_PORT: int | None = None
     SMTP_FROM_EMAIL: str | None = None
     INVITATION_ACCEPT_BASE_URL: str | None = None
+    PASSWORD_RESET_URL: str | None = None
 
     @field_validator("TRUSTED_BROWSER_ORIGINS", mode="before")
     @classmethod
@@ -114,6 +115,22 @@ class Settings(BaseSettings):
             if parsed_accept_url.hostname in {"localhost", "127.0.0.1"}:
                 raise ValueError(
                     "INVITATION_ACCEPT_BASE_URL must not use development hosts outside local/test"
+                )
+            if (
+                self.PASSWORD_RESET_URL is None
+                or not self.PASSWORD_RESET_URL.strip()
+            ):
+                raise ValueError(
+                    "PASSWORD_RESET_URL is required outside local/test"
+                )
+            parsed_reset_url = urlsplit(self.PASSWORD_RESET_URL.strip())
+            if parsed_reset_url.scheme != "https" or not parsed_reset_url.netloc:
+                raise ValueError(
+                    "PASSWORD_RESET_URL must be an https URL outside local/test"
+                )
+            if parsed_reset_url.hostname in {"localhost", "127.0.0.1"}:
+                raise ValueError(
+                    "PASSWORD_RESET_URL must not use development hosts outside local/test"
                 )
         return self
 

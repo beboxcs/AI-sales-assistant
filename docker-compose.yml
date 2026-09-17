@@ -29,6 +29,7 @@ services:
       - SMTP_PORT=1025
       - SMTP_FROM_EMAIL=invites@local.real-estate-ai.test
       - INVITATION_ACCEPT_BASE_URL=http://localhost:3000/invitations/accept
+      - PASSWORD_RESET_URL=http://localhost:3000/reset-password
     depends_on:
       - db
       - mailpit

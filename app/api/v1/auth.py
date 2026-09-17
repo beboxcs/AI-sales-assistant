@@ -2,9 +2,14 @@ from typing import Protocol
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, Security
 from pydantic import BaseModel, ConfigDict
-from starlette.status import HTTP_204_NO_CONTENT
+from starlette.status import HTTP_202_ACCEPTED, HTTP_204_NO_CONTENT
 
 from app.api.errors import APIError
+from app.api.password_reset_delivery import (
+    PasswordResetDeliveryError,
+    PasswordResetDeliveryService,
+    get_password_reset_delivery_service,
+)
 from app.api.security import (
     SESSION_COOKIE_NAME,
     HumanCsrfService,
@@ -25,9 +30,12 @@ from app.auth.human.exceptions import (
     InvalidCredentialsError,
     InvalidInvitationError,
     InvalidInvitationPasswordError,
+    InvalidPasswordResetPasswordError,
+    InvalidPasswordResetTokenError,
     InvalidSessionError,
     LoginRateLimitExceededError,
     LoginRateLimitInfrastructureError,
+    PasswordResetInfrastructureError,
 )
 from app.auth.human.service import (
     authenticate_credentials,
@@ -37,6 +45,8 @@ from app.auth.human.types import (
     AcceptedInvitation,
     AuthenticatedPrincipal,
     CreatedSession,
+    CreatedPasswordReset,
+    PasswordResetResult,
 )
 from app.auth.human.types import LoginRateLimitPermit
 from app.domain.enums import MembershipRole
@@ -73,6 +83,23 @@ class AcceptInvitationResponse(BaseModel):
     company_id: int
     membership_id: int
     role: MembershipRole
+
+
+class PasswordResetRequestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str
+
+
+class PasswordResetRequestResponse(BaseModel):
+    message: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+    new_password: str
 
 
 class HumanAuthService(Protocol):
@@ -116,6 +143,21 @@ class InvitationAcceptanceService(Protocol):
         token: str,
         password: str,
     ) -> AcceptedInvitation: ...
+
+
+class PasswordResetService(Protocol):
+    def request_password_reset(
+        self,
+        *,
+        email: str,
+    ) -> CreatedPasswordReset | None: ...
+
+    def reset_password(
+        self,
+        *,
+        token: str,
+        new_password: str,
+    ) -> PasswordResetResult: ...
 
 
 class PublicHumanAuthService:
@@ -183,6 +225,27 @@ class PublicInvitationAcceptanceService:
 
 def get_invitation_acceptance_service() -> InvitationAcceptanceService:
     return PublicInvitationAcceptanceService()
+
+
+class PublicPasswordResetService:
+    def request_password_reset(
+        self,
+        *,
+        email: str,
+    ) -> CreatedPasswordReset | None:
+        return human_auth.request_password_reset(email=email)
+
+    def reset_password(
+        self,
+        *,
+        token: str,
+        new_password: str,
+    ) -> PasswordResetResult:
+        return human_auth.reset_password(token=token, new_password=new_password)
+
+
+def get_password_reset_service() -> PasswordResetService:
+    return PublicPasswordResetService()
 
 
 @router.post(
@@ -272,6 +335,90 @@ def login(
         company_id=created_session.context.company_id,
         role=created_session.context.role,
     )
+
+
+@router.post(
+    "/password-reset/request",
+    response_model=PasswordResetRequestResponse,
+    status_code=HTTP_202_ACCEPTED,
+)
+def request_password_reset(
+    request: PasswordResetRequestRequest,
+    http_request: Request,
+    password_reset_service: PasswordResetService = Depends(
+        get_password_reset_service
+    ),
+    delivery_service: PasswordResetDeliveryService = Depends(
+        get_password_reset_delivery_service
+    ),
+    raw_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> PasswordResetRequestResponse:
+    require_unambiguous_credentials(
+        raw_api_key=raw_api_key,
+        session_token=session_token,
+    )
+    require_trusted_origin(http_request)
+
+    try:
+        created_reset = password_reset_service.request_password_reset(
+            email=request.email,
+        )
+    except PasswordResetInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+    if created_reset is not None:
+        try:
+            delivery_service.deliver_password_reset(
+                recipient_email=created_reset.normalized_email,
+                token=created_reset.token,
+                expires_at=created_reset.expires_at,
+            )
+        except PasswordResetDeliveryError as exc:
+            raise _password_reset_delivery_unavailable_error() from exc
+        except Exception as exc:
+            raise _password_reset_delivery_unavailable_error() from exc
+
+    return _password_reset_request_response()
+
+
+@router.post(
+    "/password-reset/confirm",
+    status_code=HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def confirm_password_reset(
+    request: PasswordResetConfirmRequest,
+    http_request: Request,
+    password_reset_service: PasswordResetService = Depends(
+        get_password_reset_service
+    ),
+    raw_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> Response:
+    require_unambiguous_credentials(
+        raw_api_key=raw_api_key,
+        session_token=session_token,
+    )
+    require_trusted_origin(http_request)
+
+    try:
+        password_reset_service.reset_password(
+            token=request.token,
+            new_password=request.new_password,
+        )
+    except InvalidPasswordResetTokenError as exc:
+        raise _invalid_password_reset_token_error() from exc
+    except InvalidPasswordResetPasswordError as exc:
+        raise _invalid_password_reset_password_error() from exc
+    except PasswordResetInfrastructureError as exc:
+        raise _human_auth_unavailable_error() from exc
+    except Exception as exc:
+        raise _human_auth_unavailable_error() from exc
+
+    return Response(status_code=HTTP_204_NO_CONTENT)
 
 
 @router.post(
@@ -481,6 +628,36 @@ def _accept_invitation_conflict_error() -> APIError:
         status_code=409,
         code="INVITATION_CONFLICT",
         message="Invitation could not be accepted",
+    )
+
+
+def _password_reset_request_response() -> PasswordResetRequestResponse:
+    return PasswordResetRequestResponse(
+        message="If the account is eligible, password reset instructions will be sent."
+    )
+
+
+def _invalid_password_reset_token_error() -> APIError:
+    return APIError(
+        status_code=400,
+        code="INVALID_PASSWORD_RESET_TOKEN",
+        message="Password reset request is invalid or unavailable",
+    )
+
+
+def _invalid_password_reset_password_error() -> APIError:
+    return APIError(
+        status_code=422,
+        code="INVALID_PASSWORD_RESET_PASSWORD",
+        message="Password reset password is invalid",
+    )
+
+
+def _password_reset_delivery_unavailable_error() -> APIError:
+    return APIError(
+        status_code=503,
+        code="PASSWORD_RESET_DELIVERY_UNAVAILABLE",
+        message="Password reset delivery is unavailable",
     )
 
 
