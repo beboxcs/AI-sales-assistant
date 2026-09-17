@@ -24,6 +24,7 @@ services:
       - APP_ENV=local
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/real_estate_db
       - DEV_COMPANY_ID=1
+      - TRUSTED_BROWSER_ORIGINS=["http://localhost:3000"]
       - INVITATION_DELIVERY_BACKEND=smtp
       - SMTP_HOST=mailpit
       - SMTP_PORT=1025

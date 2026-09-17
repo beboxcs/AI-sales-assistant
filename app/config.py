@@ -1,3 +1,4 @@
+import ipaddress
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -86,6 +87,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "TRUSTED_BROWSER_ORIGINS must not contain wildcard origins"
                 )
+            if not self.TRUSTED_BROWSER_ORIGINS:
+                raise ValueError(
+                    "TRUSTED_BROWSER_ORIGINS is required outside local/test"
+                )
+            for origin in self.TRUSTED_BROWSER_ORIGINS:
+                parsed_origin = urlsplit(origin)
+                if _is_local_or_loopback_hostname(parsed_origin.hostname):
+                    raise ValueError(
+                        "TRUSTED_BROWSER_ORIGINS must not use development hosts outside local/test"
+                    )
             if self.INVITATION_DELIVERY_BACKEND != "smtp":
                 raise ValueError(
                     "INVITATION_DELIVERY_BACKEND=smtp is required outside local/test"
@@ -138,6 +149,18 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8"
     )
+
+
+def _is_local_or_loopback_hostname(hostname: str | None) -> bool:
+    if hostname is None:
+        return True
+    candidate = hostname.strip().lower()
+    if candidate == "localhost" or candidate.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
 
 
 settings = Settings()
