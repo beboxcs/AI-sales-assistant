@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 
@@ -13,6 +13,7 @@ from app.auth.human.exceptions import (
     InvalidCredentialsError,
     LoginRateLimitExceededError,
     LoginRateLimitInfrastructureError,
+    StaleCredentialsError,
 )
 from app.auth.human.types import (
     AuthenticatedPrincipal,
@@ -195,6 +196,57 @@ def test_login_with_trusted_origin_and_valid_credentials_succeeds(login_client):
     assert service.created_session.token not in response.text
     assert str(service.created_session.context.session_id) not in response.text
     assert str(service.created_session.context.membership_id) not in response.text
+
+
+def test_password_version_is_backend_only_and_absent_from_transport(login_client, caplog):
+    service = _human_auth_service()
+    service.principal = replace(service.principal, password_version=987654321)
+    client = login_client(service)
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "user@example.com", "password": "correct-password"},
+        headers={"Origin": TRUSTED_ORIGIN},
+    )
+    assert response.status_code == 200
+    assert service.session_calls == [service.principal]
+    assert set(response.json()) == {"user_id", "company_id", "role"}
+    assert "password_version" not in response.text
+    assert "987654321" not in response.text
+    assert "password_version" not in str(response.headers)
+    assert "987654321" not in str(response.headers)
+    assert "password_version" not in str(client.get("/openapi.json").json())
+    assert "987654321" not in caplog.text
+    assert "correct-password" not in caplog.text
+
+
+def test_login_does_not_take_password_version_from_client(login_client):
+    service = _human_auth_service()
+    client = login_client(service)
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "user@example.com", "password": "correct-password", "password_version": 999},
+        headers={"Origin": TRUSTED_ORIGIN},
+    )
+    assert response.status_code == 422
+    assert service.credential_calls == []
+    assert service.session_calls == []
+    assert "password_version" not in str(client.get("/openapi.json").json())
+
+
+def test_stale_principal_login_error_is_sanitized_and_sets_no_cookie(login_client):
+    service = _human_auth_service(
+        create_error=StaleCredentialsError("Human authentication unavailable"),
+    )
+    client = login_client(service)
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "user@example.com", "password": "correct-password"},
+        headers={"Origin": TRUSTED_ORIGIN},
+    )
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "AUTHENTICATION_UNAVAILABLE"
+    assert "set-cookie" not in response.headers
+    assert "password_version" not in response.text
 
 
 def test_login_response_uses_created_session_context(login_client):
@@ -801,6 +853,7 @@ def _human_auth_service(
         membership_id=2,
         company_id=3,
         role=MembershipRole.SALESPERSON,
+        password_version=1,
     )
     context = AuthenticatedUserContext(
         user_id=101,

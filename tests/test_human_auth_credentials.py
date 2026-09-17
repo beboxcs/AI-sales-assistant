@@ -32,6 +32,7 @@ class StubUser:
     normalized_email: str = "user@example.com"
     password_hash: str = PASSWORD_HASH
     is_active: bool = True
+    password_version: int = 1
 
 
 @dataclass
@@ -128,7 +129,7 @@ def _install_backend(
 
 
 def test_email_is_normalized_and_persisted_identity_builds_principal(monkeypatch):
-    user = StubUser(id=711)
+    user = StubUser(id=711, password_version=7)
     membership = StubMembership(
         id=822,
         user_id=user.id,
@@ -152,6 +153,7 @@ def test_email_is_normalized_and_persisted_identity_builds_principal(monkeypatch
         membership_id=822,
         company_id=933,
         role=MembershipRole.COMPANY_ADMIN,
+        password_version=7,
     )
     assert not isinstance(principal, TrustedTenantContext)
     assert contexts[0].closed is True
@@ -336,6 +338,7 @@ def test_real_postgresql_lookup_resolves_only_one_active_membership(
             membership_id=active_membership.id,
             company_id=active_company.id,
             role=MembershipRole.SALESPERSON,
+            password_version=user.password_version,
         )
         auth_session_factory = sessionmaker(
             bind=connection,

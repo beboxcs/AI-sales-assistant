@@ -35,6 +35,19 @@ class AuthenticatedPrincipal:
     membership_id: int
     company_id: int
     role: MembershipRole
+    password_version: int
+
+
+@dataclass(frozen=True)
+class CreatedPasswordReset:
+    token: str
+    normalized_email: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class PasswordResetResult:
+    user_id: int
 
 
 @dataclass(frozen=True)

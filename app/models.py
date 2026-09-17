@@ -131,11 +131,15 @@ class User(Base):
             "password_hash ~ '[^[:space:]]'",
             name="ck_users_password_hash_not_blank",
         ),
+        CheckConstraint("password_version > 0", name="ck_users_password_version_positive"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     normalized_email: Mapped[str] = mapped_column(String(320), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
@@ -165,6 +169,51 @@ class User(Base):
     @validates("normalized_email")
     def normalize_normalized_email(self, _key: str, value: str) -> str:
         return normalize_email(value)
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_digest", name="uq_password_reset_tokens_token_digest"),
+        CheckConstraint(
+            "octet_length(token_digest) = 32",
+            name="ck_password_reset_tokens_digest_sha256_length",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="ck_password_reset_tokens_expiration_after_creation",
+        ),
+        CheckConstraint(
+            "consumed_at IS NULL OR revoked_at IS NULL",
+            name="ck_password_reset_tokens_single_terminal_state",
+        ),
+        CheckConstraint(
+            "consumed_at IS NULL OR consumed_at >= created_at",
+            name="ck_password_reset_tokens_consumed_after_creation",
+        ),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= created_at",
+            name="ck_password_reset_tokens_revoked_after_creation",
+        ),
+        Index("ix_password_reset_tokens_user_id", "user_id"),
+        Index(
+            "uq_password_reset_tokens_open_user", "user_id", unique=True,
+            postgresql_where=text("consumed_at IS NULL AND revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", name="fk_password_reset_tokens_user", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    token_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CompanyInvitation(Base):

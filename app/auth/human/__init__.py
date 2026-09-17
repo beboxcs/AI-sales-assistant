@@ -22,11 +22,17 @@ from app.auth.human.exceptions import (
     LoginRateLimitInfrastructureError,
     SessionExpiredError,
     SessionRevokedError,
+    StaleCredentialsError,
+    PasswordResetError,
+    InvalidPasswordResetTokenError,
+    InvalidPasswordResetPasswordError,
+    PasswordResetInfrastructureError,
 )
 from app.auth.human.invitation_service import (
     accept_invitation,
     create_invitation,
 )
+from app.auth.human.password_reset_service import request_password_reset, reset_password
 from app.auth.human.service import (
     authenticate_credentials,
     create_session,
@@ -48,6 +54,8 @@ from app.auth.human.types import (
     CreatedInvitation,
     CreatedSession,
     LoginRateLimitPermit,
+    CreatedPasswordReset,
+    PasswordResetResult,
 )
 
 __all__ = [
@@ -86,4 +94,13 @@ __all__ = [
     "record_login_aborted",
     "record_login_failure",
     "record_login_success",
+    "CreatedPasswordReset",
+    "PasswordResetResult",
+    "PasswordResetError",
+    "InvalidPasswordResetTokenError",
+    "InvalidPasswordResetPasswordError",
+    "PasswordResetInfrastructureError",
+    "StaleCredentialsError",
+    "request_password_reset",
+    "reset_password",
 ]
