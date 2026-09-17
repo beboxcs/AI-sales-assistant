@@ -18,6 +18,7 @@ from app.auth.human.exceptions import (
     InvalidSessionError,
     SessionExpiredError,
     SessionRevokedError,
+    StaleCredentialsError,
 )
 from app.auth.human.passwords import _DUMMY_PASSWORD_HASH, verify_password
 from app.auth.human.repository import (
@@ -26,7 +27,9 @@ from app.auth.human.repository import (
 )
 from app.auth.human.session_repository import (
     find_membership_by_id,
+    find_membership_by_id_for_update,
     find_user_by_id,
+    find_user_by_id_for_update,
     find_user_session_by_token_digest_for_update,
     persist_user_session,
     refresh_user_session_activity,
@@ -91,6 +94,8 @@ def authenticate_credentials(
                 raise InvalidCredentialsError(_INVALID_CREDENTIALS_MESSAGE)
 
             membership = active_memberships[0]
+            if type(user.password_version) is not int or user.password_version <= 0:
+                raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE)
             try:
                 role = MembershipRole(membership.role)
             except (TypeError, ValueError):
@@ -103,6 +108,7 @@ def authenticate_credentials(
                 membership_id=membership.id,
                 company_id=membership.company_id,
                 role=role,
+                password_version=user.password_version,
             )
     except InvalidCredentialsError:
         raise
@@ -121,6 +127,26 @@ def create_session(
         token_digest = digest_session_token(token=token)
 
         with SessionLocal.begin() as session:
+            user = find_user_by_id_for_update(session, user_id=principal.user_id)
+            membership = find_membership_by_id_for_update(
+                session, membership_id=principal.membership_id,
+            )
+            if (
+                user is None or user.is_active is not True
+                or membership is None or membership.is_active is not True
+                or user.id != principal.user_id
+                or membership.id != principal.membership_id
+                or membership.user_id != user.id
+                or membership.company_id != principal.company_id
+                or MembershipRole(membership.role) != principal.role
+                or not isinstance(principal.role, MembershipRole)
+                or type(user.password_version) is not int or user.password_version <= 0
+                or type(principal.password_version) is not int
+                or principal.password_version <= 0
+            ):
+                raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE)
+            if principal.password_version != user.password_version:
+                raise StaleCredentialsError(_INFRASTRUCTURE_ERROR_MESSAGE)
             persisted_session = persist_user_session(
                 session,
                 user_id=principal.user_id,
@@ -144,6 +170,8 @@ def create_session(
             expires_at=expires_at,
             context=context,
         )
+    except StaleCredentialsError:
+        raise
     except Exception:
         raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE) from None
 

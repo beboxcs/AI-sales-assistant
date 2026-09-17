@@ -276,7 +276,8 @@ def test_postgresql_user_constraints_and_defaults(
 def test_orm_persists_canonical_email_and_logical_duplicates_collide(
     migration_database: MigrationDatabase,
 ) -> None:
-    command.upgrade(migration_database.config, MEMBERSHIP_REVISION)
+    # Current ORM includes additive columns introduced after the membership revision.
+    command.upgrade(migration_database.config, "head")
     with Session(migration_database.engine) as session:
         user = User(
             id=1,
@@ -306,7 +307,8 @@ def test_orm_persists_canonical_email_and_logical_duplicates_collide(
 def test_postgresql_membership_constraints_and_relationships(
     migration_database: MigrationDatabase,
 ) -> None:
-    command.upgrade(migration_database.config, MEMBERSHIP_REVISION)
+    # Relationship checks use the current User ORM, so require its current schema.
+    command.upgrade(migration_database.config, "head")
     with migration_database.engine.begin() as connection:
         connection.execute(
             sa.text(

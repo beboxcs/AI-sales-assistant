@@ -24,6 +24,15 @@ from app.auth.human import (
     LoginRateLimitInfrastructureError,
     SessionExpiredError,
     SessionRevokedError,
+    StaleCredentialsError,
+    CreatedPasswordReset,
+    PasswordResetResult,
+    PasswordResetError,
+    InvalidPasswordResetTokenError,
+    InvalidPasswordResetPasswordError,
+    PasswordResetInfrastructureError,
+    request_password_reset,
+    reset_password,
 )
 from app.auth.human.invitation_service import (
     accept_invitation,
@@ -89,6 +98,15 @@ PUBLIC_NAMES = [
     "record_login_aborted",
     "record_login_failure",
     "record_login_success",
+    "CreatedPasswordReset",
+    "PasswordResetResult",
+    "PasswordResetError",
+    "InvalidPasswordResetTokenError",
+    "InvalidPasswordResetPasswordError",
+    "PasswordResetInfrastructureError",
+    "StaleCredentialsError",
+    "request_password_reset",
+    "reset_password",
 ]
 
 
@@ -122,6 +140,7 @@ PUBLIC_NAMES = [
                 ("membership_id", int),
                 ("company_id", int),
                 ("role", MembershipRole),
+                ("password_version", int),
             ],
         ),
         (
@@ -156,7 +175,7 @@ def test_contract_dataclasses_have_exact_fields_and_are_frozen(
         expected_fields
     )
 
-    principal = AuthenticatedPrincipal(1, 2, 3, MembershipRole.SALESPERSON)
+    principal = AuthenticatedPrincipal(1, 2, 3, MembershipRole.SALESPERSON, 1)
     context = AuthenticatedUserContext(
         1,
         2,
@@ -210,6 +229,10 @@ def test_exception_hierarchy_is_exact():
     assert InactiveUserError.__bases__ == (InvalidSessionError,)
     assert InactiveMembershipError.__bases__ == (InvalidSessionError,)
     assert AuthInfrastructureError.__bases__ == (HumanAuthError,)
+    assert StaleCredentialsError.__bases__ == (AuthInfrastructureError,)
+    assert PasswordResetError.__bases__ == (HumanAuthError,)
+    for error in (InvalidPasswordResetTokenError, InvalidPasswordResetPasswordError, PasswordResetInfrastructureError):
+        assert error.__bases__ == (PasswordResetError,)
 
 
 @pytest.mark.parametrize(
@@ -404,6 +427,7 @@ def test_create_session_rejects_caller_supplied_expiration():
         2,
         3,
         MembershipRole.COMPANY_ADMIN,
+        1,
     )
 
     with pytest.raises(TypeError):

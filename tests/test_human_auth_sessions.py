@@ -2,6 +2,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
@@ -33,6 +34,7 @@ PRINCIPAL = AuthenticatedPrincipal(
     membership_id=202,
     company_id=303,
     role=MembershipRole.COMPANY_ADMIN,
+    password_version=1,
 )
 
 
@@ -96,7 +98,22 @@ def postgres_session_engine() -> Generator[Engine, None, None]:
             connection.execute(sa.text(f"DROP SCHEMA {quoted_schema_name} CASCADE"))
 
 
-def test_create_session_owns_expiry_and_returns_persisted_context(monkeypatch):
+@pytest.fixture
+def session_identity(monkeypatch):
+    monkeypatch.setattr(
+        human_service, "find_user_by_id_for_update",
+        lambda session, **kw: SimpleNamespace(id=PRINCIPAL.user_id, is_active=True, password_version=1),
+    )
+    monkeypatch.setattr(
+        human_service, "find_membership_by_id_for_update",
+        lambda session, **kw: SimpleNamespace(
+            id=PRINCIPAL.membership_id, user_id=PRINCIPAL.user_id,
+            company_id=PRINCIPAL.company_id, role=PRINCIPAL.role.value, is_active=True,
+        ),
+    )
+
+
+def test_create_session_owns_expiry_and_returns_persisted_context(monkeypatch, session_identity):
     session_factory = RecordingSessionFactory()
     persisted_values = {}
 
@@ -166,7 +183,7 @@ def test_token_digest_is_deterministic_non_plaintext_lookup_material():
     assert RAW_TOKEN.encode("ascii") not in first_digest
 
 
-def test_persistence_failure_maps_to_safe_infrastructure_error(monkeypatch):
+def test_persistence_failure_maps_to_safe_infrastructure_error(monkeypatch, session_identity):
     session_factory = RecordingSessionFactory()
 
     def fail_persistence(session, **values):
@@ -218,6 +235,7 @@ def test_postgresql_session_row_persists_authoritative_identity_and_expiry(
             membership_id=membership.id,
             company_id=company.id,
             role=MembershipRole.SALESPERSON,
+            password_version=user.password_version,
         )
         setup_session.commit()
 

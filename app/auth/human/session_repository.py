@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import CompanyMembership, User, UserSession
@@ -50,6 +50,33 @@ def find_user_by_id(
     user_id: int,
 ) -> User | None:
     return session.get(User, user_id)
+
+
+def find_user_by_id_for_update(session: Session, *, user_id: int) -> User | None:
+    return session.scalar(
+        select(User).where(User.id == user_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def find_membership_by_id_for_update(
+    session: Session, *, membership_id: int,
+) -> CompanyMembership | None:
+    return session.scalar(
+        select(CompanyMembership).where(CompanyMembership.id == membership_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+
+
+def revoke_all_user_sessions(
+    session: Session, *, user_id: int, revoked_at: datetime,
+) -> None:
+    """Revoke across all companies inside the caller's transaction."""
+    session.execute(
+        update(UserSession)
+        .where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
+        .values(revoked_at=revoked_at)
+    )
 
 
 def find_membership_by_id(

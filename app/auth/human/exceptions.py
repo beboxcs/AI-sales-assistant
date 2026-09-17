@@ -73,3 +73,23 @@ class InactiveMembershipError(InvalidSessionError):
 
 class AuthInfrastructureError(HumanAuthError):
     """Raised when human-auth infrastructure cannot complete an operation."""
+
+
+class StaleCredentialsError(AuthInfrastructureError):
+    """The authenticated credential generation is no longer current."""
+
+
+class PasswordResetError(HumanAuthError):
+    """Base class for password-reset failures."""
+
+
+class InvalidPasswordResetTokenError(PasswordResetError):
+    """The reset token cannot be used."""
+
+
+class InvalidPasswordResetPasswordError(PasswordResetError):
+    """The new password does not satisfy the existing policy."""
+
+
+class PasswordResetInfrastructureError(PasswordResetError):
+    """Password reset infrastructure is unavailable."""
