@@ -161,6 +161,8 @@ def _deployed_settings(**overrides) -> Settings:
         "DATABASE_URL": "postgresql://example",
         "API_KEY_PEPPER": "pepper",
         "DEV_COMPANY_ID": None,
+        "LOGIN_RATE_LIMIT_BACKEND": "redis",
+        "REDIS_URL": "redis://redis:6379/0",
         "TRUSTED_BROWSER_ORIGINS": ("https://app.example.com",),
         "INVITATION_DELIVERY_BACKEND": "smtp",
         "SMTP_HOST": "smtp.example.com",

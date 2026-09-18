@@ -90,12 +90,15 @@ def test_deployed_settings_require_configured_smtp_delivery():
             DATABASE_URL="postgresql://example",
             API_KEY_PEPPER="pepper",
             DEV_COMPANY_ID=None,
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL="redis://redis:6379/0",
             TRUSTED_BROWSER_ORIGINS=("https://app.example.com",),
             INVITATION_DELIVERY_BACKEND=None,
             SMTP_HOST=None,
             SMTP_PORT=None,
             SMTP_FROM_EMAIL=None,
             INVITATION_ACCEPT_BASE_URL=None,
+            PASSWORD_RESET_URL="https://app.example.com/reset-password",
         )
 
 
@@ -107,10 +110,13 @@ def test_deployed_settings_reject_mailpit_delivery_host():
             DATABASE_URL="postgresql://example",
             API_KEY_PEPPER="pepper",
             DEV_COMPANY_ID=None,
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL="redis://redis:6379/0",
             TRUSTED_BROWSER_ORIGINS=("https://app.example.com",),
             INVITATION_DELIVERY_BACKEND="smtp",
             SMTP_HOST="mailpit",
             SMTP_PORT=1025,
             SMTP_FROM_EMAIL="invites@example.com",
             INVITATION_ACCEPT_BASE_URL="https://app.example.com/invitations/accept",
+            PASSWORD_RESET_URL="https://app.example.com/reset-password",
         )
