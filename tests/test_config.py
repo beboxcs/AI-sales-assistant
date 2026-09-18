@@ -4,6 +4,21 @@ from pydantic import ValidationError
 from app.config import Settings
 
 
+def deployed_settings_kwargs() -> dict[str, object]:
+    return {
+        "DATABASE_URL": "postgresql://example",
+        "API_KEY_PEPPER": "pepper",
+        "DEV_COMPANY_ID": None,
+        "TRUSTED_BROWSER_ORIGINS": ("https://app.example.com",),
+        "INVITATION_DELIVERY_BACKEND": "smtp",
+        "SMTP_HOST": "smtp.example.com",
+        "SMTP_PORT": 587,
+        "SMTP_FROM_EMAIL": "invites@example.com",
+        "INVITATION_ACCEPT_BASE_URL": "https://app.example.com/invitations/accept",
+        "PASSWORD_RESET_URL": "https://app.example.com/reset-password",
+    }
+
+
 def test_local_config_allows_explicit_dev_company_id_without_pepper():
     settings = Settings(
         _env_file=None,
@@ -39,6 +54,167 @@ def test_login_rate_limit_backend_loads_from_environment(monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.LOGIN_RATE_LIMIT_BACKEND == "memory"
+
+
+@pytest.mark.parametrize("app_env", ["local", "test"])
+def test_local_and_test_allow_missing_login_rate_limit_backend(app_env):
+    settings = Settings(
+        _env_file=None,
+        APP_ENV=app_env,
+        DATABASE_URL="postgresql://example",
+        LOGIN_RATE_LIMIT_BACKEND=None,
+    )
+
+    assert settings.LOGIN_RATE_LIMIT_BACKEND is None
+
+
+@pytest.mark.parametrize("app_env", ["local", "test"])
+def test_local_and_test_allow_memory_login_rate_limit_backend(app_env):
+    settings = Settings(
+        _env_file=None,
+        APP_ENV=app_env,
+        DATABASE_URL="postgresql://example",
+        LOGIN_RATE_LIMIT_BACKEND="memory",
+    )
+
+    assert settings.LOGIN_RATE_LIMIT_BACKEND == "memory"
+
+
+@pytest.mark.parametrize("app_env", ["local", "test"])
+def test_local_and_test_allow_redis_login_rate_limit_backend(app_env):
+    settings = Settings(
+        _env_file=None,
+        APP_ENV=app_env,
+        DATABASE_URL="postgresql://example",
+        LOGIN_RATE_LIMIT_BACKEND="redis",
+        REDIS_URL="redis://localhost:6379/0",
+    )
+
+    assert settings.LOGIN_RATE_LIMIT_BACKEND == "redis"
+    assert settings.REDIS_URL == "redis://localhost:6379/0"
+
+
+@pytest.mark.parametrize("app_env", ["staging", "production"])
+def test_deployed_config_allows_redis_login_rate_limit_backend(app_env):
+    settings = Settings(
+        _env_file=None,
+        APP_ENV=app_env,
+        LOGIN_RATE_LIMIT_BACKEND="redis",
+        REDIS_URL="redis://redis:6379/0",
+        **deployed_settings_kwargs(),
+    )
+
+    assert settings.LOGIN_RATE_LIMIT_BACKEND == "redis"
+
+
+@pytest.mark.parametrize("app_env", ["staging", "production"])
+def test_deployed_config_rejects_memory_login_rate_limit_backend(app_env):
+    with pytest.raises(ValidationError, match="LOGIN_RATE_LIMIT_BACKEND=redis"):
+        Settings(
+            _env_file=None,
+            APP_ENV=app_env,
+            LOGIN_RATE_LIMIT_BACKEND="memory",
+            **deployed_settings_kwargs(),
+        )
+
+
+@pytest.mark.parametrize("app_env", ["staging", "production"])
+def test_deployed_config_rejects_missing_login_rate_limit_backend(app_env):
+    with pytest.raises(ValidationError, match="LOGIN_RATE_LIMIT_BACKEND"):
+        Settings(
+            _env_file=None,
+            APP_ENV=app_env,
+            LOGIN_RATE_LIMIT_BACKEND=None,
+            **deployed_settings_kwargs(),
+        )
+
+
+def test_login_rate_limit_backend_rejects_unknown_backend():
+    with pytest.raises(ValidationError, match="LOGIN_RATE_LIMIT_BACKEND"):
+        Settings(
+            _env_file=None,
+            APP_ENV="local",
+            DATABASE_URL="postgresql://example",
+            LOGIN_RATE_LIMIT_BACKEND="sqlite",
+        )
+
+
+def test_redis_login_rate_limit_backend_requires_redis_url():
+    with pytest.raises(ValidationError, match="REDIS_URL"):
+        Settings(
+            _env_file=None,
+            APP_ENV="local",
+            DATABASE_URL="postgresql://example",
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL=None,
+        )
+
+
+def test_redis_login_rate_limit_backend_rejects_malformed_redis_url():
+    with pytest.raises(ValidationError, match="REDIS_URL"):
+        Settings(
+            _env_file=None,
+            APP_ENV="local",
+            DATABASE_URL="postgresql://example",
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL="redis://localhost:bad/0",
+        )
+
+
+def test_redis_login_rate_limit_backend_rejects_unsupported_redis_url_scheme():
+    with pytest.raises(ValidationError, match="REDIS_URL"):
+        Settings(
+            _env_file=None,
+            APP_ENV="local",
+            DATABASE_URL="postgresql://example",
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL="http://localhost:6379/0",
+        )
+
+
+def test_redis_login_rate_limit_backend_accepts_rediss_url():
+    settings = Settings(
+        _env_file=None,
+        APP_ENV="local",
+        DATABASE_URL="postgresql://example",
+        LOGIN_RATE_LIMIT_BACKEND="redis",
+        REDIS_URL="rediss://redis.example.com:6379/0",
+    )
+
+    assert settings.REDIS_URL == "rediss://redis.example.com:6379/0"
+
+
+@pytest.mark.parametrize(
+    "query_parameter",
+    [
+        "decode_responses=true",
+        "socket_connect_timeout=30",
+        "socket_timeout=30",
+    ],
+)
+def test_redis_login_rate_limit_backend_rejects_frozen_client_option_query_parameters(
+    query_parameter,
+):
+    with pytest.raises(ValidationError, match="client option query parameters"):
+        Settings(
+            _env_file=None,
+            APP_ENV="local",
+            DATABASE_URL="postgresql://example",
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL=f"redis://localhost:6379/0?{query_parameter}",
+        )
+
+
+def test_redis_url_validation_does_not_connect_to_redis():
+    settings = Settings(
+        _env_file=None,
+        APP_ENV="local",
+        DATABASE_URL="postgresql://example",
+        LOGIN_RATE_LIMIT_BACKEND="redis",
+        REDIS_URL="redis://127.0.0.1:1/0",
+    )
+
+    assert settings.REDIS_URL == "redis://127.0.0.1:1/0"
 
 
 def test_trusted_browser_origins_are_normalized():
@@ -116,6 +292,8 @@ def test_deployed_config_rejects_dev_company_id(app_env):
             DATABASE_URL="postgresql://example",
             API_KEY_PEPPER="pepper",
             DEV_COMPANY_ID=1,
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL="redis://redis:6379/0",
         )
 
 
@@ -129,6 +307,8 @@ def test_deployed_config_requires_non_blank_api_key_pepper(app_env, pepper):
             DATABASE_URL="postgresql://example",
             API_KEY_PEPPER=pepper,
             DEV_COMPANY_ID=None,
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL="redis://redis:6379/0",
         )
 
 
@@ -140,5 +320,7 @@ def test_production_config_rejects_wildcard_trusted_browser_origin():
             DATABASE_URL="postgresql://example",
             API_KEY_PEPPER="pepper",
             DEV_COMPANY_ID=None,
+            LOGIN_RATE_LIMIT_BACKEND="redis",
+            REDIS_URL="redis://redis:6379/0",
             TRUSTED_BROWSER_ORIGINS=("*",),
         )

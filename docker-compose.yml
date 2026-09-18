@@ -25,6 +25,8 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/real_estate_db
       - DEV_COMPANY_ID=1
       - TRUSTED_BROWSER_ORIGINS=["http://localhost:3000"]
+      - LOGIN_RATE_LIMIT_BACKEND=memory
+      - REDIS_URL=redis://redis:6379/0
       - INVITATION_DELIVERY_BACKEND=smtp
       - SMTP_HOST=mailpit
       - SMTP_PORT=1025
@@ -41,6 +43,11 @@ services:
     restart: always
     ports:
       - "8025:8025"
+
+  redis:
+    image: redis:8.2.3-alpine
+    container_name: real_estate_redis
+    restart: always
 
 volumes:
   postgres_data:

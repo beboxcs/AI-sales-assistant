@@ -1,6 +1,6 @@
 import ipaddress
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     INVENTORY_INGEST_MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024
     TRUSTED_BROWSER_ORIGINS: tuple[str, ...] = ()
     LOGIN_RATE_LIMIT_BACKEND: str | None = None
+    REDIS_URL: str | None = None
     INVITATION_DELIVERY_BACKEND: str | None = None
     SMTP_HOST: str | None = None
     SMTP_PORT: int | None = None
@@ -74,6 +75,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_auth_configuration(self) -> "Settings":
+        self._validate_login_rate_limit_configuration()
+
         if self.APP_ENV in {"staging", "production"}:
             if self.DEV_COMPANY_ID is not None:
                 raise ValueError(
@@ -145,6 +148,21 @@ class Settings(BaseSettings):
                 )
         return self
 
+    def _validate_login_rate_limit_configuration(self) -> None:
+        backend = self.LOGIN_RATE_LIMIT_BACKEND
+        if backend not in {None, "memory", "redis"}:
+            raise ValueError(
+                "LOGIN_RATE_LIMIT_BACKEND must be 'memory', 'redis', or unset"
+            )
+
+        if self.APP_ENV in {"staging", "production"} and backend != "redis":
+            raise ValueError(
+                "LOGIN_RATE_LIMIT_BACKEND=redis is required outside local/test"
+            )
+
+        if backend == "redis":
+            _validate_redis_url(self.REDIS_URL)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8"
@@ -161,6 +179,38 @@ def _is_local_or_loopback_hostname(hostname: str | None) -> bool:
         return ipaddress.ip_address(candidate).is_loopback
     except ValueError:
         return False
+
+
+def _validate_redis_url(redis_url: str | None) -> None:
+    if redis_url is None or not redis_url.strip():
+        raise ValueError("REDIS_URL is required when LOGIN_RATE_LIMIT_BACKEND=redis")
+
+    parsed = urlsplit(redis_url.strip())
+    if parsed.scheme not in {"redis", "rediss"}:
+        raise ValueError("REDIS_URL must use redis:// or rediss://")
+    if not parsed.netloc or not parsed.hostname:
+        raise ValueError("REDIS_URL must be a valid Redis URL")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("REDIS_URL must be a valid Redis URL") from exc
+
+    frozen_client_options = {
+        "decode_responses",
+        "socket_connect_timeout",
+        "socket_timeout",
+    }
+    conflicting_options = {
+        key
+        for key, _value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() in frozen_client_options
+    }
+    if conflicting_options:
+        formatted_options = ", ".join(sorted(conflicting_options))
+        raise ValueError(
+            "REDIS_URL must not include client option query parameters: "
+            f"{formatted_options}"
+        )
 
 
 settings = Settings()
