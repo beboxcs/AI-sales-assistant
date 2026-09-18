@@ -32,7 +32,8 @@ def test_local_config_allows_explicit_dev_company_id_without_pepper():
     assert settings.API_KEY_PEPPER is None
 
 
-def test_test_config_allows_dependency_override_style_configuration():
+def test_test_config_allows_dependency_override_style_configuration(monkeypatch):
+    monkeypatch.delenv("LOGIN_RATE_LIMIT_BACKEND", raising=False)
     settings = Settings(
         _env_file=None,
         APP_ENV="test",
