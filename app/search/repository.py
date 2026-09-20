@@ -15,8 +15,11 @@ from app.models import (
 )
 from app.search.contracts import (
     PaymentPlanCandidate,
+    PriceBasis,
     SearchExecutionContext,
     UnitCandidate,
+    has_payment_plan_constraints,
+    resolve_price_basis,
 )
 
 
@@ -25,13 +28,22 @@ def search_candidates(
     *,
     filters: SearchFilters,
     context: SearchExecutionContext,
+    price_basis: PriceBasis | None = None,
 ) -> list[UnitCandidate]:
     """Return current tenant candidates for one resolved execution context."""
+    resolved_price_basis = resolve_price_basis(
+        filters=filters,
+        price_basis=price_basis,
+    )
     if not context.resolved_scope_keys:
         return []
 
     unit_rows = session.execute(
-        _eligible_units_statement(filters=filters, context=context)
+        _eligible_units_statement(
+            filters=filters,
+            context=context,
+            price_basis=resolved_price_basis,
+        )
     ).all()
     if not unit_rows:
         return []
@@ -47,6 +59,7 @@ def search_candidates(
             filters=filters,
             context=context,
             unit_ids=tuple(units_by_id),
+            price_basis=resolved_price_basis,
         )
     ).all()
     plans_by_unit_id: dict[int, dict[int, PaymentPlan]] = {}
@@ -57,7 +70,13 @@ def search_candidates(
         ] = payment_plan
         plan_scope_keys.setdefault(payment_plan.unit_id, set()).add(scope_key)
 
-    plan_semantics_active = _has_payment_plan_filters(filters)
+    plan_semantics_active = (
+        resolved_price_basis is PriceBasis.PLAN_TOTAL_PRICE
+        and (
+            has_payment_plan_constraints(filters)
+            or _has_price_bounds(filters)
+        )
+    )
     candidates: list[UnitCandidate] = []
     for unit_id in sorted(units_by_id):
         if plan_semantics_active and unit_id not in plan_scope_keys:
@@ -104,6 +123,7 @@ def _eligible_units_statement(
     *,
     filters: SearchFilters,
     context: SearchExecutionContext,
+    price_basis: PriceBasis,
 ) -> Select:
     statement = (
         select(Unit, Compound, InventoryScope.scope_key)
@@ -148,7 +168,7 @@ def _eligible_units_statement(
         statement = statement.where(Unit.bedrooms == filters.bedrooms)
     if filters.bathrooms is not None:
         statement = statement.where(Unit.bathrooms == filters.bathrooms)
-    if not _has_payment_plan_filters(filters):
+    if price_basis is PriceBasis.BASE_PRICE:
         if filters.min_price is not None:
             statement = statement.where(Unit.base_price >= filters.min_price)
         if filters.max_price is not None:
@@ -166,6 +186,7 @@ def _eligible_plans_statement(
     filters: SearchFilters,
     context: SearchExecutionContext,
     unit_ids: tuple[int, ...],
+    price_basis: PriceBasis,
 ) -> Select:
     statement = (
         select(PaymentPlan, InventoryScope.scope_key)
@@ -219,7 +240,7 @@ def _eligible_plans_statement(
         statement = statement.where(
             PaymentPlan.installment_years >= filters.min_installment_years
         )
-    if _has_payment_plan_filters(filters):
+    if price_basis is PriceBasis.PLAN_TOTAL_PRICE:
         if filters.min_price is not None:
             statement = statement.where(
                 PaymentPlan.total_price >= filters.min_price
@@ -232,15 +253,8 @@ def _eligible_plans_statement(
     return statement
 
 
-def _has_payment_plan_filters(filters: SearchFilters) -> bool:
-    return any(
-        value is not None
-        for value in (
-            filters.payment_method,
-            filters.max_down_payment,
-            filters.min_installment_years,
-        )
-    )
+def _has_price_bounds(filters: SearchFilters) -> bool:
+    return filters.min_price is not None or filters.max_price is not None
 
 
 def _ordered_matching_scope_keys(
