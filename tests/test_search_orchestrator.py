@@ -25,6 +25,7 @@ from app.domain.enums import Currency, UnitStatus
 from app.search import service as search_service
 from app.search.contracts import (
     PaymentPlanCandidate,
+    PriceBasis,
     SearchExecutionContext,
     UnitCandidate,
 )
@@ -44,8 +45,8 @@ def test_exact_candidate_flow_and_final_item_assembly(monkeypatch):
     candidate = _candidate(unit_id=7)
     calls = []
 
-    def execute_search(*, filters, context):
-        calls.append((filters, context))
+    def execute_search(*, filters, context, price_basis):
+        calls.append((filters, context, price_basis))
         return [candidate]
 
     monkeypatch.setattr(search_service, "execute_search", execute_search)
@@ -59,7 +60,7 @@ def test_exact_candidate_flow_and_final_item_assembly(monkeypatch):
     assert result.results[0].ranking.evaluation.unit_id == 7
     assert result.results[0].explanation.unit_id == 7
     assert result.results[0].ranking.score == Decimal("1")
-    assert calls == [(strategy.filters, _context())]
+    assert calls == [(strategy.filters, _context(), PriceBasis.BASE_PRICE)]
 
 
 def test_exact_near_alternative_execute_in_plan_order(monkeypatch):
@@ -78,14 +79,17 @@ def test_exact_near_alternative_execute_in_plan_order(monkeypatch):
     plan = build_search_plan(strategy)
     calls = []
 
-    def execute_search(*, filters, context):
-        calls.append(filters)
+    def execute_search(*, filters, context, price_basis):
+        calls.append((filters, price_basis))
         return []
 
     monkeypatch.setattr(search_service, "execute_search", execute_search)
     execute_search_intelligence(strategy=strategy, plan=plan, context=_context())
 
-    assert [filters for filters in calls] == [attempt.filters for attempt in plan.attempts]
+    assert [filters for filters, _ in calls] == [
+        attempt.filters for attempt in plan.attempts
+    ]
+    assert {price_basis for _, price_basis in calls} == {PriceBasis.BASE_PRICE}
     assert [attempt.sequence for attempt in plan.attempts] == [1, 2, 3]
 
 
@@ -121,7 +125,7 @@ def test_same_unit_across_attempts_keeps_first_appearance_and_attempt(monkeypatc
     responses = iter(([first], [later]))
     calls = []
 
-    def execute_search(*, filters, context):
+    def execute_search(*, filters, context, price_basis):
         calls.append(filters)
         return next(responses)
 
@@ -199,7 +203,7 @@ def test_empty_search_result_and_empty_resolved_scopes_are_valid(monkeypatch):
     plan = _exact_plan(strategy)
     contexts = []
 
-    def execute_search(*, filters, context):
+    def execute_search(*, filters, context, price_basis):
         contexts.append(context)
         return []
 
@@ -213,6 +217,41 @@ def test_empty_search_result_and_empty_resolved_scopes_are_valid(monkeypatch):
 
     assert result.results == ()
     assert contexts == [empty_context]
+
+
+def test_plan_total_price_basis_survives_cumulative_plan_field_drops(monkeypatch):
+    strategy = _strategy(
+        SearchFilters(
+            payment_method="Cash",
+            max_down_payment=500_000,
+            min_installment_years=5,
+            max_price=6_000_000,
+        ),
+        match_mode=MatchMode.ALTERNATIVE,
+        drop_rules=[
+            AlternativeDropRule(field=SearchField.PAYMENT_METHOD, priority=1),
+            AlternativeDropRule(field=SearchField.MAX_DOWN_PAYMENT, priority=2),
+            AlternativeDropRule(field=SearchField.MIN_INSTALLMENT_YEARS, priority=3),
+        ],
+    )
+    plan = build_search_plan(strategy)
+    calls = []
+
+    def execute_search(*, filters, context, price_basis):
+        calls.append((filters, price_basis))
+        return []
+
+    monkeypatch.setattr(search_service, "execute_search", execute_search)
+    execute_search_intelligence(strategy=strategy, plan=plan, context=_context())
+
+    assert len(calls) == 4
+    assert calls[-1][0].payment_method is None
+    assert calls[-1][0].max_down_payment is None
+    assert calls[-1][0].min_installment_years is None
+    assert calls[-1][0].max_price == Decimal("6000000")
+    assert {price_basis for _, price_basis in calls} == {
+        PriceBasis.PLAN_TOTAL_PRICE
+    }
 
 
 def test_repeated_execution_is_deterministic(monkeypatch):

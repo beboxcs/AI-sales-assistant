@@ -14,7 +14,11 @@ from app.ai_engine.recommendation_explanation import (
 from app.ai_engine.search_planner import SearchPlan
 from app.ai_engine.search_strategy import SearchStrategy
 from app.search import service as search_service
-from app.search.contracts import SearchExecutionContext, UnitCandidate
+from app.search.contracts import (
+    SearchExecutionContext,
+    UnitCandidate,
+    resolve_price_basis,
+)
 
 
 class SearchIntelligenceContractError(Exception):
@@ -43,6 +47,10 @@ def execute_search_intelligence(
 ) -> SearchIntelligenceResult:
     """Execute a search plan and assemble globally ranked explanations."""
 
+    price_basis = resolve_price_basis(
+        filters=strategy.filters,
+        price_basis=None,
+    )
     candidates_by_unit_id: dict[int, UnitCandidate] = {}
     evaluations: list[CandidateEvaluation] = []
 
@@ -50,6 +58,7 @@ def execute_search_intelligence(
         candidates = search_service.execute_search(
             filters=attempt.filters,
             context=context,
+            price_basis=price_basis,
         )
         attempt_unit_ids: set[int] = set()
 
@@ -68,6 +77,7 @@ def execute_search_intelligence(
                 strategy=strategy,
                 attempt=attempt,
                 candidate=candidate,
+                price_basis=price_basis,
             )
             candidates_by_unit_id[candidate.unit_id] = candidate
             evaluations.append(evaluation)
