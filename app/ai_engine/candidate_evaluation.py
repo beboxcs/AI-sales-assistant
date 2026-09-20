@@ -10,7 +10,12 @@ from app.ai_engine.search_strategy import (
     SearchField,
     SearchStrategy,
 )
-from app.search.contracts import PaymentPlanCandidate, UnitCandidate
+from app.search.contracts import (
+    PaymentPlanCandidate,
+    PriceBasis,
+    UnitCandidate,
+    resolve_price_basis,
+)
 
 
 class CandidateEvaluationError(Exception):
@@ -89,21 +94,22 @@ def evaluate_candidate(
     strategy: SearchStrategy,
     attempt: SearchAttempt,
     candidate: UnitCandidate,
+    price_basis: PriceBasis | None = None,
 ) -> CandidateEvaluation:
     """Evaluate one backend candidate without mutating any input contract."""
 
+    resolved_price_basis = resolve_price_basis(
+        filters=strategy.filters,
+        price_basis=price_basis,
+    )
     constraints = {constraint.field: constraint.strength for constraint in strategy.constraints}
     adjustments = {adjustment.field: adjustment for adjustment in attempt.adjustments}
     baseline_filters = strategy.filters
     attempted_filters = attempt.filters
-    plan_semantics_relevant = _plan_semantics_relevant(
-        baseline_filters, attempted_filters
-    )
-
     _validate_executed_plan_contract(
         attempted_filters=attempted_filters,
         candidate=candidate,
-        plan_semantics_relevant=plan_semantics_relevant,
+        price_basis=resolved_price_basis,
     )
 
     payment_plan_evaluations = tuple(
@@ -136,14 +142,14 @@ def evaluate_candidate(
         candidate_value = _candidate_value(
             field,
             candidate,
-            plan_semantics_relevant=plan_semantics_relevant,
+            price_basis=resolved_price_basis,
         )
 
         matches_baseline = _field_satisfaction(
             field,
             candidate,
             baseline_value,
-            plan_semantics_relevant=plan_semantics_relevant,
+            price_basis=resolved_price_basis,
             allow_unknown=True,
         )
         if was_dropped:
@@ -153,7 +159,7 @@ def evaluate_candidate(
                 field,
                 candidate,
                 attempted_value,
-                plan_semantics_relevant=plan_semantics_relevant,
+                price_basis=resolved_price_basis,
                 allow_unknown=False,
             )
             if not satisfies_attempt:
@@ -166,7 +172,7 @@ def evaluate_candidate(
             field,
             baseline_value,
             candidate_value,
-            plan_semantics_relevant=plan_semantics_relevant,
+            price_basis=resolved_price_basis,
         )
         strength = constraints.get(field)
         evaluation = FieldEvaluation(
@@ -198,19 +204,11 @@ def evaluate_candidate(
     )
 
 
-def _plan_semantics_relevant(baseline_filters, attempted_filters) -> bool:
-    return any(
-        getattr(filters, field.value) is not None
-        for filters in (baseline_filters, attempted_filters)
-        for field in _PLAN_FIELDS
-    )
-
-
 def _candidate_value(
     field: SearchField,
     candidate: UnitCandidate,
     *,
-    plan_semantics_relevant: bool,
+    price_basis: PriceBasis,
 ) -> object | None:
     if field is SearchField.LOCATION:
         return candidate.location
@@ -223,7 +221,7 @@ def _candidate_value(
     if field in {SearchField.MIN_AREA_SQM, SearchField.MAX_AREA_SQM}:
         return candidate.area_sqm
     if field in {SearchField.MIN_PRICE, SearchField.MAX_PRICE}:
-        if not plan_semantics_relevant:
+        if price_basis is PriceBasis.BASE_PRICE:
             return candidate.base_price
         return _aggregate_plan_values(candidate.payment_plans, "total_price")
     if field is SearchField.PAYMENT_METHOD:
@@ -251,7 +249,7 @@ def _field_satisfaction(
     candidate: UnitCandidate,
     threshold: object | None,
     *,
-    plan_semantics_relevant: bool,
+    price_basis: PriceBasis,
     allow_unknown: bool,
 ) -> bool:
     if threshold is None:
@@ -265,7 +263,10 @@ def _field_satisfaction(
             allow_unknown=allow_unknown,
         )
 
-    if field in {SearchField.MIN_PRICE, SearchField.MAX_PRICE} and plan_semantics_relevant:
+    if (
+        field in {SearchField.MIN_PRICE, SearchField.MAX_PRICE}
+        and price_basis is PriceBasis.PLAN_TOTAL_PRICE
+    ):
         return _any_plan_field_satisfies(
             candidate.payment_plans,
             field,
@@ -276,7 +277,7 @@ def _field_satisfaction(
     candidate_value = _candidate_value(
         field,
         candidate,
-        plan_semantics_relevant=False,
+        price_basis=PriceBasis.BASE_PRICE,
     )
     result = _compare_value(field, candidate_value, threshold)
     if result is None:
@@ -371,11 +372,11 @@ def _field_deviation(
     baseline_value: object,
     candidate_value: object | None,
     *,
-    plan_semantics_relevant: bool,
+    price_basis: PriceBasis,
 ) -> NumericDeviation | None:
     if field not in _NUMERIC_FIELDS or candidate_value is None:
         return None
-    if plan_semantics_relevant and field in {
+    if price_basis is PriceBasis.PLAN_TOTAL_PRICE and field in {
         SearchField.MIN_PRICE,
         SearchField.MAX_PRICE,
         SearchField.MAX_DOWN_PAYMENT,
@@ -463,13 +464,13 @@ def _validate_executed_plan_contract(
     *,
     attempted_filters,
     candidate: UnitCandidate,
-    plan_semantics_relevant: bool,
+    price_basis: PriceBasis,
 ) -> None:
     attempt_uses_plans = any(
         getattr(attempted_filters, field.value) is not None
         for field in _PLAN_FIELDS
     ) or (
-        plan_semantics_relevant
+        price_basis is PriceBasis.PLAN_TOTAL_PRICE
         and any(
             getattr(attempted_filters, field.value) is not None
             for field in {SearchField.MIN_PRICE, SearchField.MAX_PRICE}
@@ -491,7 +492,7 @@ def _validate_executed_plan_contract(
             field in _PLAN_FIELDS
             or (
                 field in {SearchField.MIN_PRICE, SearchField.MAX_PRICE}
-                and plan_semantics_relevant
+                and price_basis is PriceBasis.PLAN_TOTAL_PRICE
             )
         )
     ]

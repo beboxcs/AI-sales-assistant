@@ -22,7 +22,7 @@ from app.ai_engine.search_strategy import (
     SearchStrategy,
 )
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
-from app.search.contracts import PaymentPlanCandidate, UnitCandidate
+from app.search.contracts import PaymentPlanCandidate, PriceBasis, UnitCandidate
 
 
 def _plan(
@@ -423,6 +423,65 @@ def test_price_without_payment_plan_filters_uses_unit_base_price():
 
     assert _field(result, SearchField.MAX_PRICE).candidate_value == Decimal("8000000")
     assert _field(result, SearchField.MAX_PRICE).satisfies_attempt is True
+
+
+def _evaluate_after_payment_method_drop(
+    *,
+    base_price: Decimal,
+    plan_total: Decimal | None,
+):
+    strategy = _strategy(
+        SearchFilters(payment_method="Cash", max_price=Decimal("6000000")),
+        SearchField.PAYMENT_METHOD,
+        SearchField.MAX_PRICE,
+    )
+    attempt = _attempt(
+        SearchFilters(max_price=Decimal("6000000")),
+        mode=MatchMode.ALTERNATIVE,
+        adjustments=[
+            FieldAdjustment(
+                field=SearchField.PAYMENT_METHOD,
+                action=AdjustmentAction.DROPPED,
+                original_value="Cash",
+                adjusted_value=None,
+            )
+        ],
+    )
+    return evaluate_candidate(
+        strategy=strategy,
+        attempt=attempt,
+        candidate=_candidate(
+            base_price=base_price,
+            payment_plans=(_plan(total_price=plan_total),),
+        ),
+        price_basis=PriceBasis.PLAN_TOTAL_PRICE,
+    )
+
+
+def test_plan_total_price_rejects_over_budget_plan_after_payment_method_drop():
+    with pytest.raises(CandidateContractViolationError):
+        _evaluate_after_payment_method_drop(
+            base_price=Decimal("5000000"),
+            plan_total=Decimal("7000000"),
+        )
+
+
+def test_plan_total_price_accepts_qualifying_plan_after_payment_method_drop():
+    result = _evaluate_after_payment_method_drop(
+        base_price=Decimal("7000000"),
+        plan_total=Decimal("5800000"),
+    )
+
+    assert _field(result, SearchField.MAX_PRICE).candidate_value == Decimal("5800000")
+    assert _field(result, SearchField.MAX_PRICE).satisfies_attempt is True
+
+
+def test_plan_total_price_never_falls_back_to_base_price_after_method_drop():
+    with pytest.raises(CandidateContractViolationError):
+        _evaluate_after_payment_method_drop(
+            base_price=Decimal("5000000"),
+            plan_total=None,
+        )
 
 
 def test_alternative_candidate_is_valid_after_explicit_soft_drop():

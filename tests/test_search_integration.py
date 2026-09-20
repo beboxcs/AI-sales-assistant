@@ -309,6 +309,108 @@ def test_plan_aware_price_uses_total_price_not_base_price(
     ]
 
 
+def test_plan_price_basis_survives_payment_method_alternative_drop(
+    db_session,
+    monkeypatch,
+):
+    company = _add_company(db_session)
+    compound = _add_compound(db_session, company, "compound:stable-plan-price")
+    scope = _add_scope(db_session, company, "scope:stable-plan-price")
+    over_budget = _add_unit(
+        db_session,
+        company,
+        compound,
+        "PLAN-OVER-BUDGET",
+        base_price=Decimal("5000000.00"),
+    )
+    affordable = _add_unit(
+        db_session,
+        company,
+        compound,
+        "PLAN-AFFORDABLE",
+        base_price=Decimal("7000000.00"),
+    )
+    boundary = _add_unit(
+        db_session,
+        company,
+        compound,
+        "PLAN-BOUNDARY",
+        base_price=Decimal("7000000.00"),
+    )
+    missing_total = _add_unit(
+        db_session,
+        company,
+        compound,
+        "PLAN-MISSING-TOTAL",
+        base_price=Decimal("5000000.00"),
+    )
+    units = (over_budget, affordable, boundary, missing_total)
+    for unit in units:
+        _add_unit_state(db_session, company, unit, scope)
+
+    plans = (
+        _add_plan(
+            db_session,
+            company,
+            over_budget,
+            "plan:over-budget",
+            total_price=Decimal("7000000.00"),
+        ),
+        _add_plan(
+            db_session,
+            company,
+            affordable,
+            "plan:affordable",
+            total_price=Decimal("5800000.00"),
+        ),
+        _add_plan(
+            db_session,
+            company,
+            boundary,
+            "plan:boundary",
+            total_price=Decimal("6000000.00"),
+        ),
+        _add_plan(
+            db_session,
+            company,
+            missing_total,
+            "plan:missing-total",
+            total_price=None,
+        ),
+    )
+    for payment_plan in plans:
+        _add_plan_state(db_session, company, payment_plan, scope)
+
+    strategy = SearchStrategy(
+        filters=SearchFilters(payment_method="Cash", max_price=6_000_000),
+        constraints=[
+            SearchConstraint(
+                field=SearchField.PAYMENT_METHOD,
+                strength=ConstraintStrength.SOFT,
+            ),
+            SearchConstraint(
+                field=SearchField.MAX_PRICE,
+                strength=ConstraintStrength.HARD,
+            ),
+        ],
+        match_mode=MatchMode.ALTERNATIVE,
+        alternative_drop_rules=[
+            AlternativeDropRule(field=SearchField.PAYMENT_METHOD)
+        ],
+    )
+
+    result = _run(
+        db_session,
+        monkeypatch,
+        strategy=strategy,
+        context=_context(company, scope),
+    )
+
+    assert {
+        item.candidate.external_unit_id for item in result.results
+    } == {"PLAN-AFFORDABLE", "PLAN-BOUNDARY"}
+
+
 def test_unit_and_payment_plan_must_be_present_in_same_scope(
     db_session,
     monkeypatch,
