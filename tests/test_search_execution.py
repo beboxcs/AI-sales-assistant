@@ -18,10 +18,12 @@ from app.models import (
     Unit,
     UnitInventoryState,
 )
+from app.search import repository as search_repository
 from app.search import service as search_service
-from app.search.contracts import SearchExecutionContext
+from app.search.contracts import PriceBasis, SearchExecutionContext
 from app.search.exceptions import (
     InvalidSearchScopeError,
+    SearchExecutionError,
     SearchExecutionFailedError,
 )
 
@@ -58,6 +60,60 @@ def test_empty_resolved_scopes_returns_empty_without_opening_session(monkeypatch
     )
 
     assert result == []
+
+
+@pytest.mark.parametrize(
+    ("filters", "price_basis", "message"),
+    [
+        (
+            SearchFilters(payment_method="Cash"),
+            PriceBasis.BASE_PRICE,
+            "BASE_PRICE is inconsistent",
+        ),
+        (
+            SearchFilters(),
+            "PLAN_TOTAL_PRICE",
+            "price_basis must be a PriceBasis value",
+        ),
+    ],
+)
+def test_invalid_price_basis_is_rejected_before_empty_scope_return(
+    monkeypatch,
+    filters,
+    price_basis,
+    message,
+):
+    def fail_if_called():
+        raise AssertionError("SessionLocal must not be called for empty scopes")
+
+    monkeypatch.setattr(search_service, "SessionLocal", fail_if_called)
+
+    with pytest.raises(SearchExecutionError, match=message):
+        search_service.execute_search(
+            filters=filters,
+            context=SearchExecutionContext(
+                company_id=1,
+                resolved_scope_keys=(),
+            ),
+            price_basis=price_basis,
+        )
+
+
+def test_repository_validates_price_basis_before_empty_scope_return():
+    class FailIfUsedSession:
+        def execute(self, *args, **kwargs):
+            raise AssertionError("database must not be queried for empty scopes")
+
+    with pytest.raises(SearchExecutionError, match="BASE_PRICE is inconsistent"):
+        search_repository.search_candidates(
+            FailIfUsedSession(),
+            filters=SearchFilters(payment_method="Cash"),
+            context=SearchExecutionContext(
+                company_id=1,
+                resolved_scope_keys=(),
+            ),
+            price_basis=PriceBasis.BASE_PRICE,
+        )
 
 
 def test_search_enforces_tenant_and_resolved_scope_isolation(
@@ -268,6 +324,162 @@ def test_plan_price_includes_unit_outside_base_price_budget(
     assert [item.plan_key for item in results[0].payment_plans] == [
         "plan:inside-budget"
     ]
+
+
+def test_explicit_base_price_preserves_unit_price_filtering(
+    db_session: Session,
+    monkeypatch,
+):
+    company, scope, unit = _seed_present_unit(db_session)
+    plan = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:above-unit-budget",
+        total_price=Decimal("7000000.00"),
+    )
+    _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(max_price=6_000_000),
+        price_basis=PriceBasis.BASE_PRICE,
+    )
+
+    assert [candidate.unit_id for candidate in results] == [unit.id]
+    assert [item.plan_key for item in results[0].payment_plans] == [
+        "plan:above-unit-budget"
+    ]
+
+
+def test_explicit_plan_total_max_price_survives_dropped_plan_constraints(
+    db_session: Session,
+    monkeypatch,
+):
+    company = _add_company(db_session)
+    compound = _add_compound(db_session, company, "compound:one")
+    scope = _add_scope(db_session, company, "scope:one")
+    candidate_a = _add_unit(
+        db_session,
+        company,
+        compound,
+        "A",
+        base_price=Decimal("5000000.00"),
+    )
+    candidate_b = _add_unit(
+        db_session,
+        company,
+        compound,
+        "B",
+        base_price=Decimal("7000000.00"),
+    )
+    for unit in (candidate_a, candidate_b):
+        _add_unit_state(db_session, company, unit, scope)
+
+    outside_plan = _add_plan(
+        db_session,
+        company,
+        candidate_a,
+        "plan:a-outside",
+        total_price=Decimal("7000000.00"),
+    )
+    qualifying_plan = _add_plan(
+        db_session,
+        company,
+        candidate_b,
+        "plan:b-qualifying",
+        total_price=Decimal("5800000.00"),
+    )
+    second_outside_plan = _add_plan(
+        db_session,
+        company,
+        candidate_b,
+        "plan:b-outside",
+        total_price=Decimal("7500000.00"),
+    )
+    for plan in (outside_plan, qualifying_plan, second_outside_plan):
+        _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(max_price=6_000_000),
+        price_basis=PriceBasis.PLAN_TOTAL_PRICE,
+    )
+
+    assert [candidate.external_unit_id for candidate in results] == ["B"]
+    assert [item.plan_key for item in results[0].payment_plans] == [
+        "plan:b-qualifying"
+    ]
+
+
+def test_explicit_plan_total_min_price_filters_plans_and_units(
+    db_session: Session,
+    monkeypatch,
+):
+    company, scope, unit = _seed_present_unit(db_session)
+    below_minimum = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:below-minimum",
+        total_price=Decimal("4500000.00"),
+    )
+    at_minimum = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:at-minimum",
+        total_price=Decimal("5500000.00"),
+    )
+    for plan in (below_minimum, at_minimum):
+        _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(min_price=5_500_000),
+        price_basis=PriceBasis.PLAN_TOTAL_PRICE,
+    )
+
+    assert [candidate.unit_id for candidate in results] == [unit.id]
+    assert [item.plan_key for item in results[0].payment_plans] == [
+        "plan:at-minimum"
+    ]
+
+
+def test_explicit_plan_total_price_never_falls_back_for_null_total(
+    db_session: Session,
+    monkeypatch,
+):
+    company, scope, unit = _seed_present_unit(db_session)
+    plan = _add_plan(
+        db_session,
+        company,
+        unit,
+        "plan:no-total-price",
+        total_price=None,
+    )
+    _add_plan_state(db_session, company, plan, scope)
+
+    results = _execute(
+        db_session,
+        monkeypatch,
+        company_id=company.id,
+        scope_keys=(scope.scope_key,),
+        filters=SearchFilters(max_price=6_000_000),
+        price_basis=PriceBasis.PLAN_TOTAL_PRICE,
+    )
+
+    assert unit.base_price == Decimal("5000000.00")
+    assert results == []
 
 
 def test_plan_filters_and_price_bounds_match_the_same_plan(
@@ -645,6 +857,7 @@ def _execute(
     company_id: int,
     scope_keys: tuple[str, ...],
     filters: SearchFilters | None = None,
+    price_basis: PriceBasis | None = None,
 ):
     monkeypatch.setattr(
         search_service,
@@ -657,6 +870,7 @@ def _execute(
             company_id=company_id,
             resolved_scope_keys=scope_keys,
         ),
+        price_basis=price_basis,
     )
 
 

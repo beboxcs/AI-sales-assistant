@@ -3,8 +3,51 @@
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from enum import Enum
 
+from app.ai_engine.search_filters import SearchFilters
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
+from app.search.exceptions import SearchExecutionError
+
+
+class PriceBasis(str, Enum):
+    BASE_PRICE = "BASE_PRICE"
+    PLAN_TOTAL_PRICE = "PLAN_TOTAL_PRICE"
+
+
+def has_payment_plan_constraints(filters: SearchFilters) -> bool:
+    """Return whether the current filters constrain payment-plan fields."""
+    return any(
+        value is not None
+        for value in (
+            filters.payment_method,
+            filters.max_down_payment,
+            filters.min_installment_years,
+        )
+    )
+
+
+def resolve_price_basis(
+    *,
+    filters: SearchFilters,
+    price_basis: PriceBasis | None,
+) -> PriceBasis:
+    """Resolve legacy calls and reject inconsistent execution metadata."""
+    has_plan_constraints = has_payment_plan_constraints(filters)
+    if price_basis is None:
+        return (
+            PriceBasis.PLAN_TOTAL_PRICE
+            if has_plan_constraints
+            else PriceBasis.BASE_PRICE
+        )
+
+    if not isinstance(price_basis, PriceBasis):
+        raise SearchExecutionError("price_basis must be a PriceBasis value")
+    if price_basis is PriceBasis.BASE_PRICE and has_plan_constraints:
+        raise SearchExecutionError(
+            "BASE_PRICE is inconsistent with active payment-plan constraints"
+        )
+    return price_basis
 
 
 @dataclass(frozen=True)

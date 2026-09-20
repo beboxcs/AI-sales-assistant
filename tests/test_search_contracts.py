@@ -4,12 +4,15 @@ from decimal import Decimal
 
 import pytest
 
+from app.ai_engine.search_filters import SearchFilters
 from app.domain.enums import Currency, PaymentMethod, UnitStatus
 from app.search.contracts import (
     PaymentPlanCandidate,
+    PriceBasis,
     SearchExecutionContext,
     SearchExecutionResult,
     UnitCandidate,
+    resolve_price_basis,
 )
 from app.search.exceptions import (
     InvalidSearchScopeError,
@@ -88,6 +91,75 @@ def test_empty_resolved_scope_keys_is_allowed():
     context = SearchExecutionContext(company_id=7, resolved_scope_keys=())
 
     assert context.resolved_scope_keys == ()
+
+
+def test_price_basis_has_exactly_the_frozen_values():
+    assert list(PriceBasis) == [
+        PriceBasis.BASE_PRICE,
+        PriceBasis.PLAN_TOTAL_PRICE,
+    ]
+    assert PriceBasis.BASE_PRICE.value == "BASE_PRICE"
+    assert PriceBasis.PLAN_TOTAL_PRICE.value == "PLAN_TOTAL_PRICE"
+
+
+@pytest.mark.parametrize(
+    ("filters", "expected"),
+    [
+        (SearchFilters(), PriceBasis.BASE_PRICE),
+        (
+            SearchFilters(payment_method="Cash"),
+            PriceBasis.PLAN_TOTAL_PRICE,
+        ),
+        (
+            SearchFilters(max_down_payment=500_000),
+            PriceBasis.PLAN_TOTAL_PRICE,
+        ),
+        (
+            SearchFilters(min_installment_years=5),
+            PriceBasis.PLAN_TOTAL_PRICE,
+        ),
+    ],
+)
+def test_omitted_price_basis_is_inferred_from_plan_constraints(
+    filters: SearchFilters,
+    expected: PriceBasis,
+):
+    assert resolve_price_basis(filters=filters, price_basis=None) is expected
+
+
+def test_explicit_plan_total_price_is_valid_without_plan_constraints():
+    resolved = resolve_price_basis(
+        filters=SearchFilters(max_price=6_000_000),
+        price_basis=PriceBasis.PLAN_TOTAL_PRICE,
+    )
+
+    assert resolved is PriceBasis.PLAN_TOTAL_PRICE
+
+
+def test_explicit_base_price_rejects_active_plan_constraints():
+    with pytest.raises(
+        SearchExecutionError,
+        match="BASE_PRICE is inconsistent",
+    ):
+        resolve_price_basis(
+            filters=SearchFilters(payment_method="Cash"),
+            price_basis=PriceBasis.BASE_PRICE,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_price_basis",
+    ["PLAN_TOTAL_PRICE", "BASE_PRICE", 1, object()],
+)
+def test_invalid_explicit_price_basis_type_is_rejected(invalid_price_basis):
+    with pytest.raises(
+        SearchExecutionError,
+        match="price_basis must be a PriceBasis value",
+    ):
+        resolve_price_basis(
+            filters=SearchFilters(),
+            price_basis=invalid_price_basis,
+        )
 
 
 def test_payment_plan_candidate_allows_missing_total_price():
