@@ -4,6 +4,7 @@ from starlette.middleware.cors import CORSMiddleware
 from app.api.errors import register_exception_handlers
 from app.api.v1.v1_router import router as v1_router
 from app.config import settings
+from app.security_headers import SecurityHeadersMiddleware
 
 CORS_ALLOW_METHODS = ["GET", "POST"]
 CORS_ALLOW_HEADERS = ["Content-Type", "X-CSRF-Token"]
@@ -25,6 +26,10 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=CORS_ALLOW_METHODS,
         allow_headers=CORS_ALLOW_HEADERS,
+    )
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        include_hsts=settings.APP_ENV in {"staging", "production"},
     )
     register_exception_handlers(app)
     app.include_router(v1_router, prefix="/api/v1")
