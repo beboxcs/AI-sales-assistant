@@ -264,6 +264,19 @@ def test_company_id_cannot_be_supplied_in_request_body(client):
     assert calls["search"] == []
 
 
+def test_price_basis_cannot_be_supplied_in_request_body(client):
+    test_client, calls, _ = client
+
+    response = test_client.post(
+        "/api/v1/search",
+        json={"price_basis": "PLAN_TOTAL_PRICE"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "price_basis"]
+    assert calls["search"] == []
+
+
 def test_invalid_numeric_bounds_are_rejected(client):
     test_client, calls, _ = client
 
@@ -481,6 +494,100 @@ def test_decimal_date_and_enum_fields_serialize_correctly(client):
     assert result["unit"]["payment_plans"][0]["total_price"] == "4700000.25"
 
 
+def test_search_response_projects_public_contract_without_internal_metadata(client):
+    test_client, _, _ = client
+
+    response = test_client.post("/api/v1/search", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"results"}
+    assert len(body["results"]) == 1
+
+    result = body["results"][0]
+    assert set(result) == {"unit", "ranking", "explanation"}
+
+    unit = result["unit"]
+    assert set(unit) == {
+        "unit_id",
+        "external_unit_id",
+        "compound_id",
+        "compound_name",
+        "location",
+        "property_type",
+        "bedrooms",
+        "bathrooms",
+        "area_sqm",
+        "base_price",
+        "base_currency",
+        "status",
+        "delivery_date",
+        "source_last_updated",
+        "matched_scope_keys",
+        "payment_plans",
+    }
+    assert unit["base_currency"] == "EGP"
+    assert unit["status"] == "Available"
+    assert unit["matched_scope_keys"] == ["scope:resolved"]
+    assert isinstance(unit["matched_scope_keys"], list)
+
+    payment_plan = unit["payment_plans"][0]
+    assert set(payment_plan) == {
+        "plan_key",
+        "source_plan_id",
+        "plan_name",
+        "payment_method",
+        "down_payment",
+        "installment_years",
+        "total_price",
+        "currency",
+    }
+    assert payment_plan == {
+        "plan_key": "installment-6y",
+        "source_plan_id": "plan-source-1",
+        "plan_name": "Six year installment",
+        "payment_method": "Installment",
+        "down_payment": "700000.00",
+        "installment_years": "6",
+        "total_price": "4700000.25",
+        "currency": "EGP",
+    }
+
+    assert result["ranking"] == {
+        "rank": 1,
+        "score": "0.95",
+        "best_plan_key": "installment-6y",
+    }
+    assert result["explanation"] == {
+        "strengths": [
+            {
+                "dimension": "location",
+                "kind": "strength",
+                "message_key": "matches_location",
+                "baseline_value": "New Cairo",
+                "candidate_value": "New Cairo",
+                "score": "1",
+            }
+        ],
+        "tradeoffs": [
+            {
+                "dimension": "price",
+                "kind": "tradeoff",
+                "message_key": "price_relaxed",
+                "baseline_value": [None, 4500000.0],
+                "candidate_value": "4700000.25",
+                "score": "0.8",
+            }
+        ],
+    }
+
+    response_text = response.text
+    assert "PriceBasis" not in response_text
+    assert "price_basis" not in response_text
+    assert "company_id" not in response_text
+    assert "attempt_sequence" not in response_text
+
+
 def test_explanation_baseline_decimal_values_keep_numeric_response_shape(client):
     test_client, _, _ = client
 
@@ -533,6 +640,7 @@ def test_openapi_documents_search_request_body(client):
     assert schema["title"] == "SearchRequest"
     assert schema["additionalProperties"] is False
     assert schema["properties"]["min_price"]["anyOf"][0]["type"] == "number"
+    assert "price_basis" not in schema["properties"]
 
 
 def test_no_sqlalchemy_or_session_use_exists_in_api_route():
