@@ -374,13 +374,31 @@ class _DefaultLoginRateLimiterProvider:
     def __init__(self):
         self._lock = threading.Lock()
         self._local_limiter: LoginRateLimiter | None = None
+        self._redis_limiter: LoginRateLimiter | None = None
 
     def get(self) -> LoginRateLimiter:
         app_env = settings.APP_ENV
         backend = settings.LOGIN_RATE_LIMIT_BACKEND
-        if app_env not in {"local", "test"}:
-            raise LoginRateLimitInfrastructureError(_INFRASTRUCTURE_MESSAGE)
-        if backend not in {None, "memory"}:
+        if backend == "redis":
+            with self._lock:
+                if self._redis_limiter is None:
+                    try:
+                        from app.infrastructure.redis import create_redis_client
+                        from app.auth.human.redis_login_rate_limit_store import (
+                            RedisLoginRateLimitStore,
+                        )
+
+                        self._redis_limiter = LoginRateLimiter(
+                            store=RedisLoginRateLimitStore(
+                                client=create_redis_client(settings),
+                            ),
+                        )
+                    except Exception:
+                        raise LoginRateLimitInfrastructureError(
+                            _INFRASTRUCTURE_MESSAGE
+                        ) from None
+                return self._redis_limiter
+        if app_env not in {"local", "test"} or backend not in {None, "memory"}:
             raise LoginRateLimitInfrastructureError(_INFRASTRUCTURE_MESSAGE)
 
         with self._lock:
