@@ -63,21 +63,39 @@ jobs:
       - name: Show running containers
         run: docker compose ps
 
-      - name: Wait for FastAPI
+      - name: Wait for API liveness
         shell: bash
         run: |
           for i in {1..30}; do
-            if curl -f http://localhost:8000/docs; then
-              echo "FastAPI is running."
+            if curl -fsS http://localhost:8000/api/v1/health; then
+              echo "API liveness check passed."
               exit 0
             fi
 
-            echo "Waiting for FastAPI..."
+            echo "Waiting for API liveness..."
             sleep 2
           done
 
-          echo "FastAPI did not start in time."
+          echo "API liveness check did not pass in time."
           docker compose logs web
+          exit 1
+
+      - name: Verify API readiness
+        shell: bash
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/api/v1/ready; then
+              echo "API readiness check passed."
+              exit 0
+            fi
+
+            echo "Waiting for API readiness..."
+            sleep 2
+          done
+
+          echo "API readiness check did not pass in time."
+          docker compose logs web
+          docker compose logs db
           exit 1
 
       - name: Show logs on failure
