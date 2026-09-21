@@ -316,6 +316,11 @@ def test_service_signatures_are_frozen():
                 inspect.Parameter.KEYWORD_ONLY,
                 annotation=str,
             ),
+            inspect.Parameter(
+                "company_id",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=int,
+            ),
         ],
         return_annotation=AuthenticatedPrincipal,
     )

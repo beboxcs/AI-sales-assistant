@@ -97,6 +97,7 @@ def _install_backend(
 ):
     contexts = []
     lookups = []
+    membership_lookups = []
 
     def session_factory():
         context = RecordingSessionContext()
@@ -109,10 +110,20 @@ def _install_backend(
             raise error
         return user
 
-    def find_memberships(session, *, user_id):
+    def find_membership(session, *, user_id, company_id):
         assert user is not None
         assert user_id == user.id
-        return list(memberships)
+        membership_lookups.append((user_id, company_id))
+        return next(
+            (
+                membership
+                for membership in memberships
+                if membership.user_id == user_id
+                and membership.company_id == company_id
+                and membership.is_active is True
+            ),
+            None,
+        )
 
     monkeypatch.setattr(human_service, "SessionLocal", session_factory)
     monkeypatch.setattr(
@@ -122,10 +133,10 @@ def _install_backend(
     )
     monkeypatch.setattr(
         human_service,
-        "find_active_memberships_for_user",
-        find_memberships,
+        "find_active_membership_for_user_and_company",
+        find_membership,
     )
-    return contexts, lookups
+    return contexts, lookups, membership_lookups
 
 
 def test_email_is_normalized_and_persisted_identity_builds_principal(monkeypatch):
@@ -136,7 +147,7 @@ def test_email_is_normalized_and_persisted_identity_builds_principal(monkeypatch
         company_id=933,
         role=MembershipRole.COMPANY_ADMIN.value,
     )
-    contexts, lookups = _install_backend(
+    contexts, lookups, membership_lookups = _install_backend(
         monkeypatch,
         user=user,
         memberships=[membership],
@@ -145,9 +156,11 @@ def test_email_is_normalized_and_persisted_identity_builds_principal(monkeypatch
     principal = human_service.authenticate_credentials(
         email="  USER@Example.COM\t",
         password=PASSWORD,
+        company_id=membership.company_id,
     )
 
     assert lookups == ["user@example.com"]
+    assert membership_lookups == [(user.id, membership.company_id)]
     assert principal == AuthenticatedPrincipal(
         user_id=711,
         membership_id=822,
@@ -160,18 +173,15 @@ def test_email_is_normalized_and_persisted_identity_builds_principal(monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("user", "password", "memberships"),
+    ("user", "password", "memberships", "company_id"),
     [
-        (StubUser(), "wrong password", [StubMembership()]),
-        (None, PASSWORD, []),
-        (StubUser(is_active=False), PASSWORD, [StubMembership()]),
-        (StubUser(), PASSWORD, []),
-        (StubUser(), PASSWORD, [StubMembership(is_active=False)]),
-        (
-            StubUser(),
-            PASSWORD,
-            [StubMembership(id=1), StubMembership(id=2, company_id=404)],
-        ),
+        (StubUser(), "wrong password", [StubMembership()], 303),
+        (StubUser(), "wrong password", [StubMembership()], 999),
+        (None, PASSWORD, [], 303),
+        (StubUser(is_active=False), PASSWORD, [StubMembership()], 303),
+        (StubUser(), PASSWORD, [], 303),
+        (StubUser(), PASSWORD, [StubMembership(is_active=False)], 303),
+        (StubUser(), PASSWORD, [StubMembership(company_id=404)], 303),
     ],
 )
 def test_ordinary_authentication_rejections_are_indistinguishable(
@@ -179,8 +189,9 @@ def test_ordinary_authentication_rejections_are_indistinguishable(
     user,
     password,
     memberships,
+    company_id,
 ):
-    contexts, _ = _install_backend(
+    contexts, _, membership_lookups = _install_backend(
         monkeypatch,
         user=user,
         memberships=memberships,
@@ -190,11 +201,50 @@ def test_ordinary_authentication_rejections_are_indistinguishable(
         human_service.authenticate_credentials(
             email="user@example.com",
             password=password,
+            company_id=company_id,
         )
 
     assert type(exc_info.value) is InvalidCredentialsError
     assert str(exc_info.value) == "Invalid credentials"
     assert contexts[0].closed is True
+    if user is None or user.is_active is not True or password != PASSWORD:
+        assert membership_lookups == []
+
+
+def test_company_id_is_required_and_single_membership_is_not_inferred(
+    monkeypatch,
+):
+    def fail_if_called():
+        raise AssertionError("missing company_id must not open a session")
+
+    monkeypatch.setattr(human_service, "SessionLocal", fail_if_called)
+
+    with pytest.raises(TypeError, match="company_id"):
+        human_service.authenticate_credentials(
+            email="user@example.com",
+            password=PASSWORD,
+        )
+
+
+@pytest.mark.parametrize(
+    "company_id",
+    [True, False, 0, -1, "303", 303.0, None, object()],
+)
+def test_invalid_company_id_fails_closed_without_database_access(
+    monkeypatch,
+    company_id,
+):
+    def fail_if_called():
+        raise AssertionError("invalid company_id must not open a session")
+
+    monkeypatch.setattr(human_service, "SessionLocal", fail_if_called)
+
+    with pytest.raises(InvalidCredentialsError, match="^Invalid credentials$"):
+        human_service.authenticate_credentials(
+            email="user@example.com",
+            password=PASSWORD,
+            company_id=company_id,
+        )
 
 
 def test_unknown_email_runs_argon2_equivalent_dummy_verification(monkeypatch):
@@ -211,6 +261,7 @@ def test_unknown_email_runs_argon2_equivalent_dummy_verification(monkeypatch):
         human_service.authenticate_credentials(
             email="missing@example.com",
             password="supplied password",
+            company_id=303,
         )
 
     assert verification_calls == [
@@ -240,6 +291,7 @@ def test_invalid_persisted_membership_role_is_sanitized_infrastructure_error(
         human_service.authenticate_credentials(
             email=user.normalized_email,
             password=PASSWORD,
+            company_id=303,
         )
 
     assert str(exc_info.value) == "Human authentication unavailable"
@@ -248,7 +300,7 @@ def test_invalid_persisted_membership_role_is_sanitized_infrastructure_error(
 
 
 def test_database_failure_is_translated_without_leaking_details(monkeypatch):
-    contexts, _ = _install_backend(
+    contexts, _, _ = _install_backend(
         monkeypatch,
         error=RuntimeError("postgresql://secret internal details"),
     )
@@ -257,6 +309,7 @@ def test_database_failure_is_translated_without_leaking_details(monkeypatch):
         human_service.authenticate_credentials(
             email="user@example.com",
             password=PASSWORD,
+            company_id=303,
         )
 
     assert str(exc_info.value) == "Human authentication unavailable"
@@ -296,6 +349,7 @@ def test_unusable_persisted_password_hash_runs_dummy_work_and_is_invalid(
         human_service.authenticate_credentials(
             email=user.normalized_email,
             password=PASSWORD,
+            company_id=303,
         )
 
     assert str(exc_info.value) == "Invalid credentials"
@@ -303,7 +357,7 @@ def test_unusable_persisted_password_hash_runs_dummy_work_and_is_invalid(
     assert repr(user.password_hash) not in str(exc_info.value)
 
 
-def test_real_postgresql_lookup_resolves_only_one_active_membership(
+def test_real_postgresql_lookup_selects_each_active_company_membership(
     monkeypatch,
     postgres_human_auth_engine,
 ):
@@ -312,18 +366,24 @@ def test_real_postgresql_lookup_resolves_only_one_active_membership(
     setup_session = Session(bind=connection, join_transaction_mode="create_savepoint")
     try:
         marker = uuid4().hex
-        active_company = Company(name=f"Human Auth Active {marker}")
+        company_a = Company(name=f"Human Auth A {marker}")
+        company_b = Company(name=f"Human Auth B {marker}")
         inactive_company = Company(name=f"Human Auth Inactive {marker}")
         user = User(
             normalized_email=f"  Auth-{marker}@EXAMPLE.COM ",
             password_hash=hash_password(PASSWORD),
         )
-        setup_session.add_all([active_company, inactive_company, user])
+        setup_session.add_all([company_a, company_b, inactive_company, user])
         setup_session.flush()
-        active_membership = CompanyMembership(
+        membership_a = CompanyMembership(
             user_id=user.id,
-            company_id=active_company.id,
+            company_id=company_a.id,
             role=MembershipRole.SALESPERSON.value,
+        )
+        membership_b = CompanyMembership(
+            user_id=user.id,
+            company_id=company_b.id,
+            role=MembershipRole.COMPANY_ADMIN.value,
         )
         inactive_membership = CompanyMembership(
             user_id=user.id,
@@ -331,15 +391,10 @@ def test_real_postgresql_lookup_resolves_only_one_active_membership(
             role=MembershipRole.COMPANY_ADMIN.value,
             is_active=False,
         )
-        setup_session.add_all([active_membership, inactive_membership])
-        setup_session.flush()
-        expected = AuthenticatedPrincipal(
-            user_id=user.id,
-            membership_id=active_membership.id,
-            company_id=active_company.id,
-            role=MembershipRole.SALESPERSON,
-            password_version=user.password_version,
+        setup_session.add_all(
+            [membership_a, membership_b, inactive_membership]
         )
+        setup_session.flush()
         auth_session_factory = sessionmaker(
             bind=connection,
             join_transaction_mode="create_savepoint",
@@ -350,12 +405,36 @@ def test_real_postgresql_lookup_resolves_only_one_active_membership(
             auth_session_factory,
         )
 
-        principal = human_service.authenticate_credentials(
-            email=f" AUTH-{marker}@example.com\t",
-            password=PASSWORD,
-        )
+        for company, membership, role in (
+            (company_a, membership_a, MembershipRole.SALESPERSON),
+            (company_b, membership_b, MembershipRole.COMPANY_ADMIN),
+        ):
+            principal = human_service.authenticate_credentials(
+                email=f" AUTH-{marker}@example.com\t",
+                password=PASSWORD,
+                company_id=company.id,
+            )
+            assert principal == AuthenticatedPrincipal(
+                user_id=user.id,
+                membership_id=membership.id,
+                company_id=company.id,
+                role=role,
+                password_version=user.password_version,
+            )
 
-        assert principal == expected
+        for unavailable_company_id in (
+            inactive_company.id,
+            max(company_a.id, company_b.id, inactive_company.id) + 1,
+        ):
+            with pytest.raises(
+                InvalidCredentialsError,
+                match="^Invalid credentials$",
+            ):
+                human_service.authenticate_credentials(
+                    email=f" AUTH-{marker}@example.com\t",
+                    password=PASSWORD,
+                    company_id=unavailable_company_id,
+                )
     finally:
         setup_session.close()
         if transaction.is_active:

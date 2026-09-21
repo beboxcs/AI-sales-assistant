@@ -1,8 +1,10 @@
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
 from types import SimpleNamespace
+import threading
+import time
+from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -15,6 +17,7 @@ from app.auth.human import (
     AuthenticatedPrincipal,
     AuthenticatedUserContext,
     CreatedSession,
+    InactiveMembershipError,
 )
 from app.auth.human import service as human_service
 from app.auth.human.sessions import (
@@ -273,3 +276,261 @@ def test_postgresql_session_row_persists_authoritative_identity_and_expiry(
         assert persisted.token_digest == digest_session_token(token=created.token)
         assert persisted.token_digest != created.token.encode("ascii")
         assert persisted.revoked_at is None
+
+
+def test_two_company_sessions_remain_bound_to_the_selected_membership(
+    monkeypatch,
+    postgres_session_engine,
+):
+    with Session(postgres_session_engine) as setup_session:
+        user = User(
+            normalized_email=f"multi-session-{uuid4().hex}@example.com",
+            password_hash="$argon2id$opaque",
+        )
+        company_a = Company(name="Session Company A")
+        company_b = Company(name="Session Company B")
+        setup_session.add_all([user, company_a, company_b])
+        setup_session.flush()
+        membership_a = CompanyMembership(
+            user_id=user.id,
+            company_id=company_a.id,
+            role=MembershipRole.SALESPERSON.value,
+        )
+        membership_b = CompanyMembership(
+            user_id=user.id,
+            company_id=company_b.id,
+            role=MembershipRole.COMPANY_ADMIN.value,
+        )
+        setup_session.add_all([membership_a, membership_b])
+        setup_session.flush()
+        principal_a = AuthenticatedPrincipal(
+            user_id=user.id,
+            membership_id=membership_a.id,
+            company_id=company_a.id,
+            role=MembershipRole.SALESPERSON,
+            password_version=user.password_version,
+        )
+        principal_b = AuthenticatedPrincipal(
+            user_id=user.id,
+            membership_id=membership_b.id,
+            company_id=company_b.id,
+            role=MembershipRole.COMPANY_ADMIN,
+            password_version=user.password_version,
+        )
+        membership_a_id = membership_a.id
+        membership_b_id = membership_b.id
+        company_a_id = company_a.id
+        company_b_id = company_b.id
+        setup_session.commit()
+
+    monkeypatch.setattr(
+        human_service,
+        "SessionLocal",
+        sessionmaker(bind=postgres_session_engine),
+    )
+
+    session_a = human_service.create_session(principal=principal_a)
+    session_b = human_service.create_session(principal=principal_b)
+
+    context_a = human_service.resolve_session(token=session_a.token)
+    context_b = human_service.resolve_session(token=session_b.token)
+    assert (context_a.membership_id, context_a.company_id, context_a.role) == (
+        membership_a_id,
+        company_a_id,
+        MembershipRole.SALESPERSON,
+    )
+    assert (context_b.membership_id, context_b.company_id, context_b.role) == (
+        membership_b_id,
+        company_b_id,
+        MembershipRole.COMPANY_ADMIN,
+    )
+
+    tampered = replace(principal_a, company_id=company_b_id)
+    with pytest.raises(
+        AuthInfrastructureError,
+        match="^Human authentication unavailable$",
+    ):
+        human_service.create_session(principal=tampered)
+
+    with Session(postgres_session_engine) as mutation_session:
+        membership_a = mutation_session.get(CompanyMembership, membership_a_id)
+        membership_b = mutation_session.get(CompanyMembership, membership_b_id)
+        membership_a.role = MembershipRole.COMPANY_ADMIN.value
+        membership_b.is_active = False
+        mutation_session.commit()
+
+    assert human_service.resolve_session(
+        token=session_a.token,
+    ).role is MembershipRole.COMPANY_ADMIN
+    with pytest.raises(InactiveMembershipError, match="^Invalid session$"):
+        human_service.resolve_session(token=session_b.token)
+
+
+@pytest.mark.parametrize("mutation", ["deactivate", "role"])
+@pytest.mark.parametrize("first_operation", ["session", "membership"])
+def test_membership_change_and_session_creation_serialize_on_membership_row(
+    monkeypatch,
+    postgres_session_engine,
+    mutation,
+    first_operation,
+):
+    with Session(postgres_session_engine) as setup_session:
+        company = Company(name=f"Concurrent Session {uuid4().hex}")
+        user = User(
+            normalized_email=f"concurrent-session-{uuid4().hex}@example.com",
+            password_hash="$argon2id$opaque",
+        )
+        setup_session.add_all([company, user])
+        setup_session.flush()
+        membership = CompanyMembership(
+            user_id=user.id,
+            company_id=company.id,
+            role=MembershipRole.SALESPERSON.value,
+        )
+        setup_session.add(membership)
+        setup_session.flush()
+        principal = AuthenticatedPrincipal(
+            user_id=user.id,
+            membership_id=membership.id,
+            company_id=company.id,
+            role=MembershipRole.SALESPERSON,
+            password_version=user.password_version,
+        )
+        membership_id = membership.id
+        setup_session.commit()
+
+    session_factory = sessionmaker(bind=postgres_session_engine)
+    monkeypatch.setattr(human_service, "SessionLocal", session_factory)
+    real_membership_lookup = human_service.find_membership_by_id_for_update
+    acquired = {
+        "session": threading.Event(),
+        "membership": threading.Event(),
+    }
+    attempted = {
+        "session": threading.Event(),
+        "membership": threading.Event(),
+    }
+    release = threading.Event()
+    pids = {}
+    results = {}
+    errors = {}
+
+    def coordinated_membership_lookup(session, **kwargs):
+        pids["session"] = session.scalar(sa.text("SELECT pg_backend_pid()"))
+        attempted["session"].set()
+        row = real_membership_lookup(session, **kwargs)
+        acquired["session"].set()
+        if first_operation == "session":
+            assert release.wait(timeout=10)
+        return row
+
+    monkeypatch.setattr(
+        human_service,
+        "find_membership_by_id_for_update",
+        coordinated_membership_lookup,
+    )
+
+    def create_selected_session():
+        return human_service.create_session(principal=principal)
+
+    def change_membership():
+        with session_factory.begin() as session:
+            pids["membership"] = session.scalar(
+                sa.text("SELECT pg_backend_pid()")
+            )
+            attempted["membership"].set()
+            row = session.scalar(
+                sa.select(CompanyMembership)
+                .where(CompanyMembership.id == membership_id)
+                .with_for_update()
+            )
+            acquired["membership"].set()
+            if mutation == "deactivate":
+                row.is_active = False
+            else:
+                row.role = MembershipRole.COMPANY_ADMIN.value
+            if first_operation == "membership":
+                assert release.wait(timeout=10)
+
+    operations = {
+        "session": create_selected_session,
+        "membership": change_membership,
+    }
+    second_operation = (
+        "membership" if first_operation == "session" else "session"
+    )
+
+    def invoke(name):
+        try:
+            results[name] = operations[name]()
+        except Exception as error:
+            errors[name] = error
+
+    first_thread = threading.Thread(
+        target=invoke,
+        args=(first_operation,),
+        name=first_operation,
+    )
+    second_thread = threading.Thread(
+        target=invoke,
+        args=(second_operation,),
+        name=second_operation,
+    )
+    try:
+        first_thread.start()
+        assert acquired[first_operation].wait(timeout=5)
+        second_thread.start()
+        assert attempted[second_operation].wait(timeout=5)
+        deadline = time.monotonic() + 5
+        with postgres_session_engine.connect() as connection:
+            while time.monotonic() < deadline:
+                blockers = connection.scalar(
+                    sa.text("SELECT pg_blocking_pids(:pid)"),
+                    {"pid": pids[second_operation]},
+                )
+                if pids[first_operation] in blockers:
+                    break
+                threading.Event().wait(0.01)
+            else:
+                pytest.fail(
+                    "Second operation did not wait on the membership row lock"
+                )
+    finally:
+        release.set()
+        first_thread.join(timeout=20)
+        second_thread.join(timeout=20)
+
+    assert first_thread.is_alive() is False
+    assert second_thread.is_alive() is False
+    assert errors.get("membership") is None
+    with Session(postgres_session_engine) as verification_session:
+        persisted_sessions = list(
+            verification_session.scalars(sa.select(UserSession))
+        )
+        persisted_membership = verification_session.get(
+            CompanyMembership,
+            membership_id,
+        )
+
+    if first_operation == "membership":
+        assert isinstance(errors.get("session"), AuthInfrastructureError)
+        assert persisted_sessions == []
+    else:
+        assert errors == {}
+        assert isinstance(results.get("session"), CreatedSession)
+        assert len(persisted_sessions) == 1
+        if mutation == "deactivate":
+            with pytest.raises(
+                InactiveMembershipError,
+                match="^Invalid session$",
+            ):
+                human_service.resolve_session(token=results["session"].token)
+        else:
+            assert human_service.resolve_session(
+                token=results["session"].token,
+            ).role is MembershipRole.COMPANY_ADMIN
+
+    if mutation == "deactivate":
+        assert persisted_membership.is_active is False
+    else:
+        assert persisted_membership.role == MembershipRole.COMPANY_ADMIN.value

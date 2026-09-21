@@ -1,7 +1,7 @@
 from typing import Protocol
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, Security
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from starlette.status import HTTP_202_ACCEPTED, HTTP_204_NO_CONTENT
 
 from app.api.errors import APIError
@@ -59,6 +59,7 @@ class LoginRequest(BaseModel):
 
     email: str
     password: str
+    company_id: StrictInt = Field(gt=0)
 
 
 class LoginResponse(BaseModel):
@@ -108,6 +109,7 @@ class HumanAuthService(Protocol):
         *,
         email: str,
         password: str,
+        company_id: int,
     ) -> AuthenticatedPrincipal: ...
 
     def create_session(
@@ -166,8 +168,13 @@ class PublicHumanAuthService:
         *,
         email: str,
         password: str,
+        company_id: int,
     ) -> AuthenticatedPrincipal:
-        return authenticate_credentials(email=email, password=password)
+        return authenticate_credentials(
+            email=email,
+            password=password,
+            company_id=company_id,
+        )
 
     def create_session(
         self,
@@ -288,6 +295,7 @@ def login(
         principal = human_auth_service.authenticate_credentials(
             email=request.email,
             password=request.password,
+            company_id=request.company_id,
         )
     except InvalidCredentialsError as exc:
         try:

@@ -15,17 +15,15 @@ def find_user_by_normalized_email(
     return session.execute(statement).scalar_one_or_none()
 
 
-def find_active_memberships_for_user(
+def find_active_membership_for_user_and_company(
     session: Session,
     *,
     user_id: int,
-) -> list[CompanyMembership]:
-    statement = (
-        select(CompanyMembership)
-        .where(
-            CompanyMembership.user_id == user_id,
-            CompanyMembership.is_active.is_(True),
-        )
-        .order_by(CompanyMembership.id)
+    company_id: int,
+) -> CompanyMembership | None:
+    statement = select(CompanyMembership).where(
+        CompanyMembership.user_id == user_id,
+        CompanyMembership.company_id == company_id,
+        CompanyMembership.is_active.is_(True),
     )
-    return list(session.execute(statement).scalars())
+    return session.execute(statement).scalar_one_or_none()
