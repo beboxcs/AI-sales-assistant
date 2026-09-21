@@ -888,6 +888,16 @@ def test_login_body_validation_happens_before_rate_limit(login_client):
             "password": "correct-password",
             "company_id": True,
         },
+        {
+            "email": "user@example.com",
+            "password": "correct-password",
+            "company_id": False,
+        },
+        {
+            "email": "user@example.com",
+            "password": "correct-password",
+            "company_id": None,
+        },
     ],
 )
 def test_invalid_company_id_fails_validation_before_rate_limit(
