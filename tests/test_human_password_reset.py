@@ -80,8 +80,12 @@ def identity(reset_db):
     return ids
 
 
-def authenticate():
-    return humans.authenticate_credentials(email=EMAIL, password=OLD_PASSWORD)
+def authenticate(*, company_id: int):
+    return humans.authenticate_credentials(
+        email=EMAIL,
+        password=OLD_PASSWORD,
+        company_id=company_id,
+    )
 
 
 def snapshot(database):
@@ -204,7 +208,7 @@ def test_all_invalid_token_states_are_generic(monkeypatch, reset_db, identity, s
 
 @pytest.mark.parametrize("password", [None, "", " \t\n"])
 def test_existing_password_policy_failure_rolls_back(reset_db, identity, password):
-    humans.create_session(principal=authenticate())
+    humans.create_session(principal=authenticate(company_id=identity[2]))
     created = request_password_reset(email=EMAIL)
     before = snapshot(reset_db)
     with pytest.raises(InvalidPasswordResetPasswordError, match="^Invalid password reset password$"):
@@ -213,7 +217,7 @@ def test_existing_password_policy_failure_rolls_back(reset_db, identity, passwor
 
 
 def test_reset_freshness_replay_and_global_revocation(reset_db, identity):
-    old_principal = authenticate()
+    old_principal = authenticate(company_id=identity[2])
     assert old_principal.password_version == 1
     existing = humans.create_session(principal=old_principal)
     other_token = "other-user-session"
@@ -283,8 +287,12 @@ def test_reset_freshness_replay_and_global_revocation(reset_db, identity):
         reset_password(token=created.token, new_password="another password")
     assert snapshot(reset_db) == before
     with pytest.raises(InvalidCredentialsError):
-        authenticate()
-    new_principal = humans.authenticate_credentials(email=EMAIL, password=NEW_PASSWORD)
+        authenticate(company_id=identity[2])
+    new_principal = humans.authenticate_credentials(
+        email=EMAIL,
+        password=NEW_PASSWORD,
+        company_id=identity[2],
+    )
     assert new_principal.password_version == 2
     fresh_session = humans.create_session(principal=new_principal)
     assert humans.resolve_session(token=fresh_session.token).user_id == identity[0]
@@ -292,7 +300,7 @@ def test_reset_freshness_replay_and_global_revocation(reset_db, identity):
 
 @pytest.mark.parametrize("fault", ["hash", "hash_value_error", "flush", "revoke", "commit"])
 def test_partial_reset_failures_roll_back_everything(monkeypatch, reset_db, identity, fault):
-    humans.create_session(principal=authenticate())
+    humans.create_session(principal=authenticate(company_id=identity[2]))
     created = request_password_reset(email=EMAIL)
     before = snapshot(reset_db)
 
@@ -353,7 +361,7 @@ def test_request_rotation_failure_restores_previous_token(monkeypatch, reset_db,
 
 @pytest.mark.parametrize("mutation", ["inactive_user", "inactive_membership", "company", "role", "user", "invalid_role", "invalid_version", "persisted_invalid_role"])
 def test_session_creation_revalidates_trusted_identity(reset_db, identity, mutation):
-    principal = authenticate()
+    principal = authenticate(company_id=identity[2])
     with Session(reset_db) as session:
         if mutation == "inactive_user":
             session.get(User, identity[0]).is_active = False
@@ -382,7 +390,7 @@ def test_session_creation_revalidates_trusted_identity(reset_db, identity, mutat
 
 
 def test_explicit_stale_principal_inserts_zero_sessions(reset_db, identity):
-    principal = authenticate()
+    principal = authenticate(company_id=identity[2])
     created = request_password_reset(email=EMAIL)
     reset_password(token=created.token, new_password=NEW_PASSWORD)
     before = snapshot(reset_db)
@@ -601,7 +609,7 @@ def test_postgresql_request_vs_confirmation_both_orders(monkeypatch, reset_db, i
 
 @pytest.mark.parametrize("first_operation", ["session", "reset"])
 def test_postgresql_session_vs_reset_no_old_credential_session_survives(monkeypatch, reset_db, identity, first_operation):
-    principal = authenticate()
+    principal = authenticate(company_id=identity[2])
     created = request_password_reset(email=EMAIL)
     operations = {
         "session": lambda: humans.create_session(principal=principal),

@@ -22,7 +22,7 @@ from app.auth.human.exceptions import (
 )
 from app.auth.human.passwords import _DUMMY_PASSWORD_HASH, verify_password
 from app.auth.human.repository import (
-    find_active_memberships_for_user,
+    find_active_membership_for_user_and_company,
     find_user_by_normalized_email,
 )
 from app.auth.human.session_repository import (
@@ -59,7 +59,11 @@ def authenticate_credentials(
     *,
     email: str,
     password: str,
+    company_id: int,
 ) -> AuthenticatedPrincipal:
+    if type(company_id) is not int or company_id <= 0:
+        raise InvalidCredentialsError(_INVALID_CREDENTIALS_MESSAGE)
+
     try:
         try:
             normalized_email = normalize_email(email)
@@ -82,18 +86,18 @@ def authenticate_credentials(
             if user is None or user.is_active is not True or not password_matches:
                 raise InvalidCredentialsError(_INVALID_CREDENTIALS_MESSAGE)
 
-            active_memberships = [
-                membership
-                for membership in find_active_memberships_for_user(
-                    session,
-                    user_id=user.id,
-                )
-                if membership.is_active is True
-            ]
-            if len(active_memberships) != 1:
+            membership = find_active_membership_for_user_and_company(
+                session,
+                user_id=user.id,
+                company_id=company_id,
+            )
+            if membership is None or membership.is_active is not True:
                 raise InvalidCredentialsError(_INVALID_CREDENTIALS_MESSAGE)
-
-            membership = active_memberships[0]
+            if (
+                membership.user_id != user.id
+                or membership.company_id != company_id
+            ):
+                raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE)
             if type(user.password_version) is not int or user.password_version <= 0:
                 raise AuthInfrastructureError(_INFRASTRUCTURE_ERROR_MESSAGE)
             try:

@@ -15,6 +15,7 @@ from sqlalchemy.pool import NullPool
 
 from app.auth.human import (
     AcceptedInvitation,
+    AuthenticatedPrincipal,
     InvitationAuthorizationError,
     InvitationConflictError,
     InvitationInfrastructureError,
@@ -23,8 +24,8 @@ from app.auth.human import (
     accept_invitation,
     create_invitation,
 )
-from app.auth.human import invitation_service
-from app.auth.human.passwords import verify_password
+from app.auth.human import invitation_service, service as human_service
+from app.auth.human.passwords import hash_password, verify_password
 from app.database import Base, engine
 from app.domain.enums import MembershipRole
 from app.models import Company, CompanyInvitation, CompanyMembership, User
@@ -231,6 +232,70 @@ def test_existing_user_acceptance_preserves_password_hash_exactly(
         user = session.get(User, user_id)
         assert user is not None
         assert user.password_hash == original_hash
+
+
+def test_existing_user_accepts_second_company_and_authenticates_into_each(
+    monkeypatch,
+    postgres_invitation_engine,
+):
+    password = "existing user password"
+    created, invited_company_id, _ = _create_invitation(
+        postgres_invitation_engine,
+        email="multi-company@example.com",
+        role=MembershipRole.SALESPERSON,
+    )
+    with Session(postgres_invitation_engine) as session:
+        existing_company = Company(name="Existing Company")
+        user = User(
+            normalized_email="multi-company@example.com",
+            password_hash=hash_password(password),
+        )
+        session.add_all([existing_company, user])
+        session.flush()
+        existing_membership = CompanyMembership(
+            user_id=user.id,
+            company_id=existing_company.id,
+            role=MembershipRole.COMPANY_ADMIN.value,
+        )
+        session.add(existing_membership)
+        session.flush()
+        user_id = user.id
+        existing_company_id = existing_company.id
+        existing_membership_id = existing_membership.id
+        session.commit()
+
+    accepted = accept_invitation(token=created.token, password="ignored")
+    monkeypatch.setattr(
+        human_service,
+        "SessionLocal",
+        sessionmaker(bind=postgres_invitation_engine),
+    )
+
+    existing_principal = human_service.authenticate_credentials(
+        email=" MULTI-COMPANY@example.com ",
+        password=password,
+        company_id=existing_company_id,
+    )
+    invited_principal = human_service.authenticate_credentials(
+        email="multi-company@example.com",
+        password=password,
+        company_id=invited_company_id,
+    )
+
+    assert existing_principal == AuthenticatedPrincipal(
+        user_id=user_id,
+        membership_id=existing_membership_id,
+        company_id=existing_company_id,
+        role=MembershipRole.COMPANY_ADMIN,
+        password_version=1,
+    )
+    assert invited_principal == AuthenticatedPrincipal(
+        user_id=user_id,
+        membership_id=accepted.membership_id,
+        company_id=invited_company_id,
+        role=MembershipRole.SALESPERSON,
+        password_version=1,
+    )
 
 
 @pytest.mark.parametrize("token", [None, "", " ", "short", "!" * 43])
