@@ -1,10 +1,14 @@
 import inspect
+from decimal import Decimal
 
 import pytest
 
 from app.ai_engine import search_application
 from app.ai_engine.search_filters import SearchFilters
-from app.search.contracts import SearchExecutionContext
+from app.ai_engine.search_intent import ParsedSearchIntent
+from app.ai_engine.search_strategy import ConstraintStrength, MatchMode, SearchField
+from app.search import service as search_service
+from app.search.contracts import PriceBasis, SearchExecutionContext
 
 
 def test_search_units_composes_policy_planner_and_orchestrator(monkeypatch):
@@ -204,3 +208,188 @@ def test_facade_has_no_database_or_api_imports():
     assert "fastapi" not in source.lower()
     assert "search.repository" not in source
     assert "SessionLocal" not in source
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "3 bedroom apartment in New Cairo under 6 million cash",
+        "شقة ٣ غرف في التجمع أقل من ٦ مليون كاش",
+        "3ayez sha2a 3 bedrooms fe tagamo3 ta7t 6 million cash",
+        "عايز sha2a 3 bedrooms fe التجمع under 6 million cash",
+    ],
+)
+def test_multilingual_eligible_query_executes_real_ai_pipeline(
+    monkeypatch,
+    text,
+):
+    context = SearchExecutionContext(7, ("scope:one",))
+    calls = _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(text=text, context=context)
+
+    assert result.intent.filters == SearchFilters(
+        location="New Cairo",
+        property_type="Apartment",
+        bedrooms=3,
+        max_price=Decimal("6000000"),
+        payment_method="Cash",
+    )
+    assert result.search is not None
+    assert result.search.results == ()
+    assert calls
+    assert all(call_context is context for _, call_context, _ in calls)
+    assert {price_basis for _, _, price_basis in calls} == {
+        PriceBasis.PLAN_TOTAL_PRICE
+    }
+
+
+def test_hard_numeric_directive_is_preserved_through_execution(monkeypatch):
+    calls = _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text="must be under 6 million",
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.search is not None
+    max_price = next(
+        constraint
+        for constraint in result.search.strategy.constraints
+        if constraint.field is SearchField.MAX_PRICE
+    )
+    assert max_price.strength is ConstraintStrength.HARD
+    assert result.search.strategy.relaxation_rules == []
+    assert len(calls) == 1
+
+
+def test_preferred_flexible_location_keeps_intent_strategy_semantics(monkeypatch):
+    _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text="New Cairo preferred but other locations are okay",
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.search is not None
+    strategy = result.search.strategy
+    assert strategy.match_mode is MatchMode.ALTERNATIVE
+    assert [(item.field, item.strength) for item in strategy.constraints] == [
+        (SearchField.LOCATION, ConstraintStrength.SOFT)
+    ]
+    assert [(item.field, item.weight) for item in strategy.ranking_preferences] == [
+        (SearchField.LOCATION, 2.0)
+    ]
+    assert [item.field for item in strategy.alternative_drop_rules] == [
+        SearchField.LOCATION
+    ]
+    assert [attempt.mode for attempt in result.search.plan.attempts] == [
+        MatchMode.EXACT,
+        MatchMode.ALTERNATIVE,
+    ]
+
+
+def test_ambiguous_query_returns_diagnostics_without_backend_execution(monkeypatch):
+    calls = _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text="around 6 million",
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.search is None
+    assert result.intent.ambiguities
+    assert calls == []
+
+
+def test_unsupported_only_query_does_not_execute_broad_search(monkeypatch):
+    calls = _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text="sea view",
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.search is None
+    assert result.intent.unsupported_requirements == ["sea view"]
+    assert calls == []
+
+
+def test_query_without_supported_filters_does_not_execute_broad_search(monkeypatch):
+    calls = _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text="X7Unknown",
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.intent == ParsedSearchIntent(filters=SearchFilters())
+    assert result.search is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("text", ["", " \t\n "])
+def test_blank_query_returns_empty_intent_without_execution(monkeypatch, text):
+    calls = _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text=text,
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.intent == ParsedSearchIntent(filters=SearchFilters())
+    assert result.search is None
+    assert calls == []
+
+
+def test_supported_filter_with_unsupported_requirement_executes(monkeypatch):
+    calls = _capture_backend_calls(monkeypatch)
+    text = "apartment; sea view"
+    expected_intent = search_application.interpret_multilingual_search_query(text)
+
+    result = search_application.search_units_from_query(
+        text=text,
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.intent == expected_intent
+    assert result.search is not None
+    assert calls
+
+
+def test_zero_bedrooms_is_a_populated_supported_filter(monkeypatch):
+    calls = _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text="0 bedrooms",
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.intent.filters.bedrooms == 0
+    assert result.search is not None
+    assert calls
+
+
+def test_hostile_decimal_is_preserved_through_natural_language_pipeline(monkeypatch):
+    _capture_backend_calls(monkeypatch)
+
+    result = search_application.search_units_from_query(
+        text="under 1234567890123456.78",
+        context=SearchExecutionContext(7, ("scope:one",)),
+    )
+
+    assert result.search is not None
+    assert result.intent.filters.max_price == Decimal("1234567890123456.78")
+    assert isinstance(result.search.strategy.filters.max_price, Decimal)
+    assert result.search.strategy.filters.max_price == Decimal("1234567890123456.78")
+
+
+def _capture_backend_calls(monkeypatch):
+    calls = []
+
+    def execute_search(*, filters, context, price_basis):
+        calls.append((filters, context, price_basis))
+        return []
+
+    monkeypatch.setattr(search_service, "execute_search", execute_search)
+    return calls
