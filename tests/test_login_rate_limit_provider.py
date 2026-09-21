@@ -78,7 +78,7 @@ def test_login_api_uses_redis_via_unchanged_adapter(redis_case, monkeypatch, sce
     from app.api.v1.auth import get_human_auth_service
     from app.auth.human.exceptions import InvalidCredentialsError
     from app.main import app
-    from test_human_auth_login_api import _human_auth_service
+    from test_human_auth_login_api import _human_auth_service, _login_payload
 
     c = redis_case
     monkeypatch.setattr(policy.settings, 'LOGIN_RATE_LIMIT_BACKEND', 'redis')
@@ -93,7 +93,10 @@ def test_login_api_uses_redis_via_unchanged_adapter(redis_case, monkeypatch, sce
         with TestClient(app, client=('192.0.2.1', 50000)) as client:
             def login():
                 return client.post('/api/v1/auth/login',
-                                   json={'email': 'person@example.com', 'password': 'private-password'},
+                                   json=_login_payload(
+                                       email='person@example.com',
+                                       password='private-password',
+                                   ),
                                    headers={'Origin': 'https://app.example.com'})
             if scenario == 'outage':
                 with monkeypatch.context() as patch:

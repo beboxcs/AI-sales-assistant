@@ -29,6 +29,7 @@ TRUSTED_ORIGIN = "https://app.example.com"
 RAW_API_KEY = "rea_v1_" + ("K" * 22) + "." + ("s" * 43)
 CLIENT_IP = "testclient"
 PERMIT = LoginRateLimitPermit(attempt_id="opaque-test-permit")
+REQUEST_COMPANY_ID = 909
 
 
 @dataclass
@@ -37,7 +38,7 @@ class FakeHumanAuthService:
     created_session: CreatedSession
     auth_error: Exception | None = None
     create_error: Exception | None = None
-    credential_calls: list[tuple[str, str]] | None = None
+    credential_calls: list[tuple[str, str, int]] | None = None
     session_calls: list[AuthenticatedPrincipal] | None = None
     events: list[str] | None = None
 
@@ -52,9 +53,10 @@ class FakeHumanAuthService:
         *,
         email: str,
         password: str,
+        company_id: int,
     ) -> AuthenticatedPrincipal:
         self.events.append("authenticate")
-        self.credential_calls.append((email, password))
+        self.credential_calls.append((email, password, company_id))
         if self.auth_error is not None:
             raise self.auth_error
         return self.principal
@@ -170,7 +172,7 @@ def test_login_with_trusted_origin_and_valid_credentials_succeeds(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -181,7 +183,7 @@ def test_login_with_trusted_origin_and_valid_credentials_succeeds(login_client):
         "role": "company_admin",
     }
     assert service.credential_calls == [
-        ("user@example.com", "correct-password")
+        ("user@example.com", "correct-password", REQUEST_COMPANY_ID)
     ]
     assert service.session_calls == [service.principal]
 
@@ -204,7 +206,7 @@ def test_password_version_is_backend_only_and_absent_from_transport(login_client
     client = login_client(service)
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
     assert response.status_code == 200
@@ -224,7 +226,7 @@ def test_login_does_not_take_password_version_from_client(login_client):
     client = login_client(service)
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password", "password_version": 999},
+        json=_login_payload(password_version=999),
         headers={"Origin": TRUSTED_ORIGIN},
     )
     assert response.status_code == 422
@@ -240,7 +242,7 @@ def test_stale_principal_login_error_is_sanitized_and_sets_no_cookie(login_clien
     client = login_client(service)
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
     assert response.status_code == 500
@@ -250,6 +252,7 @@ def test_stale_principal_login_error_is_sanitized_and_sets_no_cookie(login_clien
 
 
 def test_login_response_uses_created_session_context(login_client):
+    request_company_id = 999
     context = AuthenticatedUserContext(
         user_id=404,
         membership_id=505,
@@ -268,7 +271,7 @@ def test_login_response_uses_created_session_context(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(company_id=request_company_id),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -278,6 +281,10 @@ def test_login_response_uses_created_session_context(login_client):
         "company_id": 606,
         "role": "salesperson",
     }
+    assert response.json()["company_id"] != request_company_id
+    assert service.credential_calls == [
+        ("user@example.com", "correct-password", request_company_id)
+    ]
 
 
 def test_invalid_login_credentials_return_generic_401(login_client):
@@ -288,7 +295,7 @@ def test_invalid_login_credentials_return_generic_401(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "missing@example.com", "password": "wrong-password"},
+        json=_login_payload(email="missing@example.com", password="wrong-password"),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -301,7 +308,7 @@ def test_invalid_login_credentials_return_generic_401(login_client):
     }
     assert "email does not exist" not in response.text
     assert "wrong-password" not in response.text
-    assert service.credential_calls == [("missing@example.com", "wrong-password")]
+    assert service.credential_calls == [("missing@example.com", "wrong-password", REQUEST_COMPANY_ID)]
     assert service.session_calls == []
 
 
@@ -318,7 +325,7 @@ def test_login_human_auth_failures_return_safe_500(login_client, error):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -331,7 +338,7 @@ def test_login_human_auth_failures_return_safe_500(login_client, error):
     }
     assert str(error) not in response.text
     assert "correct-password" not in response.text
-    assert service.credential_calls == [("user@example.com", "correct-password")]
+    assert service.credential_calls == [("user@example.com", "correct-password", REQUEST_COMPANY_ID)]
     assert service.session_calls == []
 
 
@@ -343,7 +350,7 @@ def test_login_create_session_failure_returns_safe_500(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -355,7 +362,7 @@ def test_login_create_session_failure_returns_safe_500(login_client):
         }
     }
     assert "session store down" not in response.text
-    assert service.credential_calls == [("user@example.com", "correct-password")]
+    assert service.credential_calls == [("user@example.com", "correct-password", REQUEST_COMPANY_ID)]
     assert service.session_calls == [service.principal]
 
 
@@ -370,7 +377,7 @@ def test_login_untrusted_or_missing_origin_prevents_auth_service_calls(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers=headers,
     )
 
@@ -406,7 +413,7 @@ def test_login_non_ambiguous_credential_presentations_are_allowed(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers=request_headers,
     )
 
@@ -416,7 +423,7 @@ def test_login_non_ambiguous_credential_presentations_are_allowed(
         "company_id": 303,
         "role": "company_admin",
     }
-    assert service.credential_calls == [("user@example.com", "correct-password")]
+    assert service.credential_calls == [("user@example.com", "correct-password", REQUEST_COMPANY_ID)]
     assert service.session_calls == [service.principal]
 
 
@@ -429,7 +436,7 @@ def test_login_rejects_both_api_key_and_session_cookie_as_ambiguous(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={
             "Origin": TRUSTED_ORIGIN,
             "X-API-Key": RAW_API_KEY,
@@ -464,7 +471,18 @@ def test_login_openapi_documents_safe_request_and_response(login_client):
     response_schema = _schema_for_ref(schema, response_ref)
 
     assert "security" not in operation
-    assert set(request_schema["properties"]) == {"email", "password"}
+    assert set(request_schema["properties"]) == {
+        "email",
+        "password",
+        "company_id",
+    }
+    assert set(request_schema["required"]) == {
+        "email",
+        "password",
+        "company_id",
+    }
+    assert request_schema["properties"]["company_id"]["type"] == "integer"
+    assert request_schema["properties"]["company_id"]["exclusiveMinimum"] == 0
     assert set(response_schema["properties"]) == {
         "user_id",
         "company_id",
@@ -490,14 +508,14 @@ def test_login_rate_limit_records_failure_before_invalid_credentials_response(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "missing@example.com", "password": "wrong-password"},
+        json=_login_payload(email="missing@example.com", password="wrong-password"),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
     assert response.status_code == 401
     assert response.json() == _invalid_credentials_response()
     assert rate_limit_service.check_calls == [(CLIENT_IP, "missing@example.com")]
-    assert service.credential_calls == [("missing@example.com", "wrong-password")]
+    assert service.credential_calls == [("missing@example.com", "wrong-password", REQUEST_COMPANY_ID)]
     assert rate_limit_service.failure_calls == [PERMIT]
     assert rate_limit_service.success_calls == []
     assert rate_limit_service.aborted_calls == []
@@ -515,7 +533,7 @@ def test_login_rate_limit_records_success_before_session_creation(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -526,7 +544,7 @@ def test_login_rate_limit_records_success_before_session_creation(login_client):
         "role": "company_admin",
     }
     assert rate_limit_service.check_calls == [(CLIENT_IP, "user@example.com")]
-    assert service.credential_calls == [("user@example.com", "correct-password")]
+    assert service.credential_calls == [("user@example.com", "correct-password", REQUEST_COMPANY_ID)]
     assert rate_limit_service.success_calls == [PERMIT]
     assert rate_limit_service.failure_calls == []
     assert rate_limit_service.aborted_calls == []
@@ -544,14 +562,14 @@ def test_login_session_creation_failure_keeps_success_outcome(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
     assert response.status_code == 500
     assert response.json() == _authentication_unavailable_response()
     assert rate_limit_service.check_calls == [(CLIENT_IP, "user@example.com")]
-    assert service.credential_calls == [("user@example.com", "correct-password")]
+    assert service.credential_calls == [("user@example.com", "correct-password", REQUEST_COMPANY_ID)]
     assert rate_limit_service.success_calls == [PERMIT]
     assert rate_limit_service.failure_calls == []
     assert rate_limit_service.aborted_calls == []
@@ -579,14 +597,14 @@ def test_login_authentication_backend_failures_record_aborted(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
     assert response.status_code == 500
     assert response.json() == _authentication_unavailable_response()
     assert rate_limit_service.check_calls == [(CLIENT_IP, "user@example.com")]
-    assert service.credential_calls == [("user@example.com", "correct-password")]
+    assert service.credential_calls == [("user@example.com", "correct-password", REQUEST_COMPANY_ID)]
     assert rate_limit_service.aborted_calls == [PERMIT]
     assert rate_limit_service.failure_calls == []
     assert rate_limit_service.success_calls == []
@@ -603,7 +621,7 @@ def test_login_rate_limit_exceeded_returns_429_without_authentication(login_clie
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "limited@example.com", "password": "any-password"},
+        json=_login_payload(email="limited@example.com", password="any-password"),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -638,7 +656,7 @@ def test_login_rate_limit_precheck_failures_are_safe_500(login_client, error):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -662,7 +680,7 @@ def test_login_failure_recording_failure_returns_safe_500(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "wrong-password"},
+        json=_login_payload(password="wrong-password"),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -684,7 +702,7 @@ def test_login_success_recording_failure_prevents_session_creation(login_client)
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -707,7 +725,7 @@ def test_login_aborted_recording_failure_returns_safe_500(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -733,7 +751,7 @@ def test_login_origin_rejection_happens_before_rate_limit(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers=headers,
     )
 
@@ -756,7 +774,7 @@ def test_login_ignores_forwarding_headers_for_rate_limit_identity(login_client):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={
             "Origin": TRUSTED_ORIGIN,
             "X-Forwarded-For": "203.0.113.222",
@@ -787,7 +805,7 @@ def test_login_missing_request_client_fails_closed_before_rate_limit(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "correct-password"},
+        json=_login_payload(),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -814,7 +832,7 @@ def test_login_unknown_email_and_wrong_password_remain_identical(
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "user@example.com", "password": "wrong-password"},
+        json=_login_payload(password="wrong-password"),
         headers={"Origin": TRUSTED_ORIGIN},
     )
 
@@ -839,6 +857,140 @@ def test_login_body_validation_happens_before_rate_limit(login_client):
     assert response.status_code == 422
     assert rate_limit_service.check_calls == []
     assert service.credential_calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"email": "user@example.com", "password": "correct-password"},
+        {
+            "email": "user@example.com",
+            "password": "correct-password",
+            "company_id": 0,
+        },
+        {
+            "email": "user@example.com",
+            "password": "correct-password",
+            "company_id": -1,
+        },
+        {
+            "email": "user@example.com",
+            "password": "correct-password",
+            "company_id": "303",
+        },
+        {
+            "email": "user@example.com",
+            "password": "correct-password",
+            "company_id": 303.0,
+        },
+        {
+            "email": "user@example.com",
+            "password": "correct-password",
+            "company_id": True,
+        },
+    ],
+)
+def test_invalid_company_id_fails_validation_before_rate_limit(
+    login_client,
+    payload,
+):
+    service = _human_auth_service()
+    rate_limit_service = FakeLoginRateLimitService()
+    client = login_client(service, rate_limit_service)
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json=payload,
+        headers={"Origin": TRUSTED_ORIGIN},
+    )
+
+    assert response.status_code == 422
+    assert rate_limit_service.check_calls == []
+    assert service.credential_calls == []
+    assert service.session_calls == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        InvalidCredentialsError("wrong password private detail"),
+        InvalidCredentialsError("unauthorized company private detail"),
+        InvalidCredentialsError("nonexistent company private detail"),
+        InvalidCredentialsError("inactive membership private detail"),
+    ],
+)
+def test_login_membership_failures_remain_generic_401(login_client, error):
+    service = _human_auth_service(auth_error=error)
+    rate_limit_service = FakeLoginRateLimitService()
+    client = login_client(service, rate_limit_service)
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json=_login_payload(password="wrong-password"),
+        headers={"Origin": TRUSTED_ORIGIN},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == _invalid_credentials_response()
+    assert rate_limit_service.failure_calls == [PERMIT]
+    assert str(error) not in response.text
+    assert "company" not in response.text.lower()
+    assert "membership" not in response.text.lower()
+
+
+def test_login_rate_limit_key_excludes_company_id(login_client):
+    service = _human_auth_service(
+        auth_error=InvalidCredentialsError("invalid credentials")
+    )
+    rate_limit_service = FakeLoginRateLimitService()
+    client = login_client(service, rate_limit_service)
+
+    for company_id in (101, 202):
+        response = client.post(
+            "/api/v1/auth/login",
+            json=_login_payload(
+                email="same@example.com",
+                password="wrong-password",
+                company_id=company_id,
+            ),
+            headers={"Origin": TRUSTED_ORIGIN},
+        )
+        assert response.status_code == 401
+
+    assert rate_limit_service.check_calls == [
+        (CLIENT_IP, "same@example.com"),
+        (CLIENT_IP, "same@example.com"),
+    ]
+    assert service.credential_calls == [
+        ("same@example.com", "wrong-password", 101),
+        ("same@example.com", "wrong-password", 202),
+    ]
+
+
+def test_public_human_auth_service_forwards_company_id_to_backend(monkeypatch):
+    calls = []
+    principal = AuthenticatedPrincipal(
+        user_id=10,
+        membership_id=20,
+        company_id=30,
+        role=MembershipRole.SALESPERSON,
+        password_version=1,
+    )
+
+    def authenticate(*, email, password, company_id):
+        calls.append((email, password, company_id))
+        return principal
+
+    monkeypatch.setattr(auth_route, "authenticate_credentials", authenticate)
+
+    result = auth_route.PublicHumanAuthService().authenticate_credentials(
+        email="person@example.com",
+        password="private-password",
+        company_id=777,
+    )
+
+    assert result is principal
+    assert calls == [("person@example.com", "private-password", 777)]
 
 
 def _human_auth_service(
@@ -892,6 +1044,22 @@ def _authentication_unavailable_response():
             "message": "Authentication could not be completed",
         }
     }
+
+
+def _login_payload(
+    *,
+    email: str = "user@example.com",
+    password: str = "correct-password",
+    company_id=REQUEST_COMPANY_ID,
+    **extra,
+):
+    payload = {
+        "email": email,
+        "password": password,
+        "company_id": company_id,
+    }
+    payload.update(extra)
+    return payload
 
 
 def _session_cookie(response):
