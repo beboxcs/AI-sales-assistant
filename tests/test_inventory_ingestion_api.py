@@ -8,6 +8,7 @@ from app.ai_engine.inventory_application import (
     InventoryIngestionResult,
     InventoryScopeError,
     InventorySourceMalformedError,
+    InventorySourceUnsupportedError,
     InventoryValidationFailedError,
     ingest_inventory,
 )
@@ -70,6 +71,24 @@ def test_xlsx_upload_is_accepted(ingestion_client_factory):
 
     assert response.status_code == 200
     assert calls[0]["source"].filename == "inventory.xlsx"
+
+
+def test_upload_extension_handling_is_case_insensitive(
+    ingestion_client_factory,
+):
+    client, calls = ingestion_client_factory()
+
+    response = client.post(
+        "/api/v1/inventory/ingest",
+        data={"scope_key": "scope:nc"},
+        files={"file": ("INVENTORY.CSV", b"unit", "text/csv")},
+    )
+
+    assert response.status_code == 200
+    assert calls[0]["source"] == InventorySource(
+        filename="INVENTORY.CSV",
+        content=b"unit",
+    )
 
 
 def test_invalid_extension_is_rejected(ingestion_client_factory):
@@ -193,6 +212,14 @@ def test_application_level_errors_are_mapped_to_safe_response(
     ("error", "expected_status", "expected_error"),
     [
         (
+            InventorySourceUnsupportedError("internal unsupported detail"),
+            400,
+            {
+                "code": "INVALID_INVENTORY_FILE_TYPE",
+                "message": "Inventory upload must be a CSV or XLSX file",
+            },
+        ),
+        (
             InventorySourceMalformedError("internal parser detail"),
             400,
             {
@@ -251,6 +278,7 @@ def test_real_application_errors_are_mapped_to_safe_responses(
     assert response.status_code == expected_status
     assert response.json() == {"error": expected_error}
     assert str(error) not in response.text
+    assert "Traceback" not in response.text
 
 
 def test_unexpected_application_errors_are_mapped_to_safe_response(
@@ -274,6 +302,7 @@ def test_unexpected_application_errors_are_mapped_to_safe_response(
         }
     }
     assert "sqlalchemy internal detail" not in response.text
+    assert "Traceback" not in response.text
 
 
 def test_missing_uploaded_file_is_rejected_by_validation(ingestion_client_factory):
