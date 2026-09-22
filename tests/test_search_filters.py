@@ -2,7 +2,11 @@ from decimal import Decimal
 
 import pytest
 
-from app.ai_engine.search_filters import SearchFilters, parse_search_filters
+from app.ai_engine.search_filters import (
+    SearchFilters,
+    SearchQueryParseError,
+    parse_search_filters,
+)
 
 
 def test_parse_search_filters_extracts_bedroom_apartment_location_and_max_price():
@@ -82,13 +86,85 @@ def test_parse_search_filters_leaves_unspecified_fields_empty():
 
 
 def test_parse_search_filters_raises_for_conflicting_bedroom_values():
-    with pytest.raises(ValueError, match="bedroom"):
+    with pytest.raises(SearchQueryParseError, match="bedroom"):
         parse_search_filters("2 bedrooms and 3 bedrooms")
 
 
 def test_parse_search_filters_raises_for_conflicting_payment_methods():
-    with pytest.raises(ValueError, match="payment"):
+    with pytest.raises(SearchQueryParseError, match="payment"):
         parse_search_filters("cash and installment")
+
+
+@pytest.mark.parametrize(
+    "money",
+    [
+        "6..5 million",
+        "6,00,000",
+        "-6 million",
+        "+6 million",
+        "6 billion",
+        "6 bn",
+        "500 thousand",
+        "6 trillion",
+        "6 crore",
+        "6 usd",
+    ],
+)
+def test_parse_search_filters_rejects_malformed_or_unsupported_money(money):
+    with pytest.raises(SearchQueryParseError, match="money"):
+        parse_search_filters(f"under {money}")
+
+
+@pytest.mark.parametrize(
+    ("money", "expected"),
+    [
+        ("0", Decimal("0")),
+        ("6000000", Decimal("6000000")),
+        ("6,000,000", Decimal("6000000")),
+        ("6 million", Decimal("6000000")),
+        ("6.5 million", Decimal("6500000")),
+        ("EGP 6000000", Decimal("6000000")),
+        ("1234567890123456.78", Decimal("1234567890123456.78")),
+    ],
+)
+def test_parse_search_filters_preserves_valid_money_exactly(money, expected):
+    filters = parse_search_filters(f"under {money}")
+
+    assert filters.max_price == expected
+    assert isinstance(filters.max_price, Decimal)
+
+
+def test_parse_search_filters_accepts_sentence_boundary_after_money():
+    filters = parse_search_filters("under 6000000. cash")
+
+    assert filters.max_price == Decimal("6000000")
+    assert filters.payment_method == "Cash"
+
+
+@pytest.mark.parametrize(
+    ("text", "field", "expected"),
+    [
+        ("under 6000000 cash", "payment_method", "Cash"),
+        ("under 6000000 villa", "property_type", "Villa"),
+    ],
+)
+def test_parse_search_filters_keeps_adjacent_supported_filter_after_money(
+    text,
+    field,
+    expected,
+):
+    filters = parse_search_filters(text)
+
+    assert filters.max_price == Decimal("6000000")
+    assert getattr(filters, field) == expected
+
+
+def test_parse_search_filters_scales_large_million_value_without_rounding():
+    filters = parse_search_filters(
+        "under 12345678901234567890123456789 million"
+    )
+
+    assert filters.max_price == Decimal("12345678901234567890123456789000000")
 
 
 def test_parse_search_filters_extracts_bathrooms():

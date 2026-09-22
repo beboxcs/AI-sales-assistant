@@ -1,8 +1,11 @@
 import re
 from decimal import Decimal
 
+from pydantic import ValidationError
+
 from app.ai_engine.search_filters import (
     LOCATION_ALIASES,
+    SearchQueryParseError,
     SearchFilters,
     parse_search_filters,
 )
@@ -31,6 +34,10 @@ _TARGET_COUNT = re.compile(
 )
 _MINIMUM_YEARS = re.compile(r"\bminimum\s+(\d+(?:\.\d+)?)\s+years?\b")
 _CLAUSE_BREAK = re.compile(r"\b(?:but|and)\b|[;!?]|\.(?!\d)|,(?!\d)")
+_NEGATED_VALUE = re.compile(
+    r"\b(?:not|no|except)\s+"
+    r"(?!(?:prefer(?:red)?|flexible|required|mandatory|must|only)\b)(.+)"
+)
 _SEMANTICS = (
     ("hard", r"\b(?:must(?:\s+(?:be|have))?|must-have|only|required?|mandatory)\s+(.+)",
      r"(.+?)\s+(?:(?:is|are)\s+)?(?:required|mandatory|must-have)\b"),
@@ -83,6 +90,8 @@ def interpret_search_query(text: str) -> ParsedSearchIntent:
 
     ambiguities: list[SearchAmbiguity] = []
     filters = _extract_filters(normalized, ambiguities)
+    filters = _suppress_negated_filters(normalized, filters, ambiguities)
+    _record_contradictory_price_range(filters, ambiguities)
     directives = _detect_directives(normalized, filters, ambiguities)
     for field, pattern, reason in _VAGUE_NUMERICS:
         if getattr(filters, field.value) is None and re.search(pattern, normalized):
@@ -106,7 +115,7 @@ def interpret_search_query(text: str) -> ParsedSearchIntent:
 def _try_parse(text: str) -> SearchFilters | None:
     try:
         return parse_search_filters(text)
-    except ValueError:
+    except (SearchQueryParseError, ValidationError):
         return None
 
 
@@ -156,6 +165,57 @@ def _suppress_year_price(text: str, filters: SearchFilters) -> SearchFilters:
     return filters.model_copy(update={
         "min_price": remaining_filters.min_price if remaining_filters else None,
     })
+
+
+def _suppress_negated_filters(
+    text: str,
+    filters: SearchFilters,
+    ambiguities: list[SearchAmbiguity],
+) -> SearchFilters:
+    suppressed: set[SearchField] = set()
+    for clause in _CLAUSE_BREAK.split(text):
+        match = _NEGATED_VALUE.search(clause)
+        negated = _try_parse(match[1]) if match else None
+        if negated is None:
+            continue
+        for field in SearchField:
+            negated_value = getattr(negated, field.value)
+            if (
+                negated_value is not None
+                and negated_value == getattr(filters, field.value)
+            ):
+                suppressed.add(field)
+
+    if not suppressed:
+        return filters
+    for field in SearchField:
+        if field in suppressed:
+            ambiguities.append(
+                SearchAmbiguity(
+                    field=field,
+                    reason="Exclusion of a supported value is not representable.",
+                )
+            )
+    return filters.model_copy(update={
+        field.value: None for field in SearchField if field in suppressed
+    })
+
+
+def _record_contradictory_price_range(
+    filters: SearchFilters,
+    ambiguities: list[SearchAmbiguity],
+) -> None:
+    if (
+        filters.min_price is not None
+        and filters.max_price is not None
+        and filters.min_price > filters.max_price
+    ):
+        ambiguities.append(
+            SearchAmbiguity(
+                field=SearchField.MAX_PRICE,
+                reason="Minimum price must not exceed maximum price.",
+            )
+        )
 
 
 def _referenced_fields(subject: str, filters: SearchFilters) -> list[SearchField]:

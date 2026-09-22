@@ -3,7 +3,8 @@ from decimal import Decimal
 
 import pytest
 
-from app.ai_engine.search_filters import parse_search_filters
+from app.ai_engine import search_intent_interpreter
+from app.ai_engine.search_filters import SearchQueryParseError, parse_search_filters
 from app.ai_engine.search_intent import SearchFieldDirective
 from app.ai_engine.search_intent_interpreter import interpret_search_query
 from app.ai_engine.search_strategy import ConstraintStrength, SearchField
@@ -53,6 +54,44 @@ def test_explicit_preference_does_not_invent_strength(text, field):
     intent = interpret_search_query(text)
 
     assert intent.directives == [SearchFieldDirective(field=field, preferred=True)]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "under 6000000 required",
+            SearchFieldDirective(
+                field=SearchField.MAX_PRICE,
+                strength=ConstraintStrength.HARD,
+            ),
+        ),
+        (
+            "under 6000000 is required",
+            SearchFieldDirective(
+                field=SearchField.MAX_PRICE,
+                strength=ConstraintStrength.HARD,
+            ),
+        ),
+        (
+            "under 6000000 preferred",
+            SearchFieldDirective(field=SearchField.MAX_PRICE, preferred=True),
+        ),
+        (
+            "under 6000000 flexible",
+            SearchFieldDirective(
+                field=SearchField.MAX_PRICE,
+                allow_alternative=True,
+            ),
+        ),
+    ],
+)
+def test_money_value_preserves_suffix_directive_vocabulary(text, expected):
+    intent = interpret_search_query(text)
+
+    assert intent.filters.max_price == Decimal("6000000")
+    assert intent.directives == [expected]
+    assert intent.ambiguities == []
 
 
 @pytest.mark.parametrize("text, preferred", [
@@ -168,6 +207,34 @@ def test_negated_or_restricted_semantics_do_not_create_broad_flexibility(text):
     assert [ambiguity.field for ambiguity in intent.ambiguities] == [SearchField.LOCATION]
 
 
+@pytest.mark.parametrize(
+    ("text", "field"),
+    [
+        ("not New Cairo", SearchField.LOCATION),
+        ("except New Cairo", SearchField.LOCATION),
+        ("no cash", SearchField.PAYMENT_METHOD),
+        ("not a villa", SearchField.PROPERTY_TYPE),
+        ("no 3 bedrooms", SearchField.BEDROOMS),
+        ("not under 6 million", SearchField.MAX_PRICE),
+    ],
+)
+def test_negated_supported_value_is_suppressed_with_field_ambiguity(text, field):
+    intent = interpret_search_query(text)
+
+    assert getattr(intent.filters, field.value) is None
+    assert [ambiguity.field for ambiguity in intent.ambiguities] == [field]
+
+
+def test_negation_suppresses_only_the_negated_field():
+    intent = interpret_search_query("apartment but not New Cairo")
+
+    assert intent.filters.property_type == "Apartment"
+    assert intent.filters.location is None
+    assert [ambiguity.field for ambiguity in intent.ambiguities] == [
+        SearchField.LOCATION
+    ]
+
+
 def test_minimum_years_does_not_create_a_price_constraint():
     intent = interpret_search_query("apartment, minimum 8 years")
 
@@ -215,9 +282,13 @@ def test_location_aliases_for_one_city_are_not_a_conflict():
     assert intent.ambiguities == []
 
 
-@pytest.mark.parametrize("text", ["cash and installments", "2 bedrooms and 3 bedrooms"])
+@pytest.mark.parametrize("text", [
+    "cash and installments",
+    "2 bedrooms and 3 bedrooms",
+    "under 6 million under 7 million",
+])
 def test_unresolved_parser_conflict_returns_ambiguity_without_guessing(text):
-    with pytest.raises(ValueError):
+    with pytest.raises(SearchQueryParseError):
         parse_search_filters(text)
 
     intent = interpret_search_query(text)
@@ -225,6 +296,61 @@ def test_unresolved_parser_conflict_returns_ambiguity_without_guessing(text):
     assert intent.filters.model_dump(exclude_none=True) == {}
     assert intent.directives == []
     assert intent.ambiguities
+
+
+def test_pydantic_user_input_failure_returns_controlled_ambiguity():
+    intent = interpret_search_query("minimum 0 years")
+
+    assert intent.filters.model_dump(exclude_none=True) == {}
+    assert intent.ambiguities
+
+
+def test_unexpected_parser_value_error_propagates(monkeypatch):
+    expected_error = ValueError("internal parser defect")
+
+    def fail(_):
+        raise expected_error
+
+    monkeypatch.setattr(search_intent_interpreter, "parse_search_filters", fail)
+
+    with pytest.raises(ValueError) as raised:
+        interpret_search_query("apartment")
+
+    assert raised.value is expected_error
+
+
+def test_inverted_price_range_is_preserved_as_ambiguity():
+    intent = interpret_search_query("above 8 million under 6 million")
+
+    assert intent.filters.min_price == Decimal("8000000")
+    assert intent.filters.max_price == Decimal("6000000")
+    assert [ambiguity.field for ambiguity in intent.ambiguities] == [
+        SearchField.MAX_PRICE
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "minimum", "maximum"),
+    [
+        ("above 6 million under 8 million", "6000000", "8000000"),
+        ("above 6 million under 6 million", "6000000", "6000000"),
+    ],
+)
+def test_valid_price_range_remains_unambiguous(text, minimum, maximum):
+    intent = interpret_search_query(text)
+
+    assert intent.filters.min_price == Decimal(minimum)
+    assert intent.filters.max_price == Decimal(maximum)
+    assert intent.ambiguities == []
+
+
+def test_repeated_identical_bound_is_deterministic():
+    text = "under 6 million under 6 million"
+    first = interpret_search_query(text)
+    second = interpret_search_query(text)
+
+    assert first == second
+    assert first.filters.max_price == Decimal("6000000")
 
 
 @pytest.mark.parametrize("text, field", [
