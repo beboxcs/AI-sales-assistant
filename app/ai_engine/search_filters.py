@@ -3,7 +3,9 @@ from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.ai_engine.inventory_loader import normalize_money
+
+class SearchQueryParseError(ValueError):
+    """Raised when user search text contains invalid structured filter syntax."""
 
 
 class SearchFilters(BaseModel):
@@ -65,9 +67,51 @@ PAYMENT_METHOD_ALIASES: dict[str, str] = {
     "installment plan": "Installment",
 }
 
-_MONEY_PATTERN = (
-    r"(?:egp\s*)?\d+(?:\.\d+)?(?:,\d{3})*"
-    r"(?:\s*(?:m|million))?"
+_PROPERTY_TYPE_ALIASES: dict[str, str] = {
+    "twin house": "Twin House",
+    "twinhouse": "Twin House",
+    "town house": "Townhouse",
+    "townhouse": "Townhouse",
+    "apartment": "Apartment",
+    "apt": "Apartment",
+    "villa": "Villa",
+    "duplex": "Duplex",
+    "penthouse": "Penthouse",
+    "chalet": "Chalet",
+}
+_FILTER_VALUE_STARTS = "|".join(
+    re.escape(token)
+    for token in sorted({
+        alias.split()[0]
+        for aliases in (
+            LOCATION_ALIASES,
+            _PROPERTY_TYPE_ALIASES,
+            PAYMENT_METHOD_ALIASES,
+        )
+        for alias in aliases
+    })
+)
+_DIRECTIVE_SUFFIX = r"(?:required|mandatory|must-have|preferred|flexible)"
+_MONEY_BOUNDARY = (
+    rf"(?:years?|and|but|with|in|{_FILTER_VALUE_STARTS}|{_DIRECTIVE_SUFFIX}|"
+    rf"(?:is|are)\s+{_DIRECTIVE_SUFFIX})"
+)
+_MONEY_CANDIDATE = (
+    r"(?:egp\s*)?[+-]?\d[\d,.]*"
+    rf"(?:(?!\s+{_MONEY_BOUNDARY}\b)"
+    r"\s*[^\W\d_]\w*)?"
+    r"[.,;:!?]?"
+)
+_VALID_MONEY = re.compile(
+    r"(?:egp\s*)?"
+    r"(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+    r"(?:\s*(?P<scale>million|m))?"
+    r"(?:\s*egp)?",
+    re.IGNORECASE,
+)
+_MONEY_SENTENCE_BOUNDARY = re.compile(
+    r"(?P<money>.+\d)[.,;:!?]\s+\w+",
+    re.IGNORECASE,
 )
 
 
@@ -104,19 +148,7 @@ def _normalize_text(text: str) -> str:
 
 
 def _extract_property_type(text: str) -> str | None:
-    property_aliases = {
-        "twin house": "Twin House",
-        "twinhouse": "Twin House",
-        "town house": "Townhouse",
-        "townhouse": "Townhouse",
-        "apartment": "Apartment",
-        "apt": "Apartment",
-        "villa": "Villa",
-        "duplex": "Duplex",
-        "penthouse": "Penthouse",
-        "chalet": "Chalet",
-    }
-    return _extract_alias(text, property_aliases)
+    return _extract_alias(text, _PROPERTY_TYPE_ALIASES)
 
 
 def _extract_alias(text: str, aliases: dict[str, str]) -> str | None:
@@ -127,7 +159,9 @@ def _extract_alias(text: str, aliases: dict[str, str]) -> str | None:
     }
 
     if len(matches) > 1:
-        raise ValueError(f"Conflicting values found: {sorted(matches)}")
+        raise SearchQueryParseError(
+            f"Conflicting values found: {sorted(matches)}"
+        )
     return next(iter(matches), None)
 
 
@@ -146,23 +180,31 @@ def _extract_integer_count(
         return None
 
     count_pattern = re.compile(rf"\b(\d+)\s*(?:{label_pattern})\b")
-    values = {int(match.group(1)) for match in count_pattern.finditer(text)}
+    try:
+        values = {int(match.group(1)) for match in count_pattern.finditer(text)}
+    except ValueError as exc:
+        raise SearchQueryParseError(f"Invalid {field_name} value") from exc
 
     if len(values) > 1:
-        raise ValueError(f"Conflicting {field_name} values found: {sorted(values)}")
+        raise SearchQueryParseError(
+            f"Conflicting {field_name} values found: {sorted(values)}"
+        )
     return next(iter(values), None)
 
 
 def _extract_money_limit(text: str, limit_type: str) -> Decimal | None:
     if limit_type == "max_price":
         patterns = [
-            rf"\bmax\s+budget\s+(?:is\s+)?(?P<money>{_MONEY_PATTERN})\b",
-            rf"\bbudget\s+(?:is\s+)?(?:up\s+to\s+)?(?P<money>{_MONEY_PATTERN})\b",
-            rf"\b(?:under|below)\s+(?P<money>{_MONEY_PATTERN})\b",
+            rf"\bmax\s+budget\s+(?:is\s+)?"
+            rf"(?P<money>{_MONEY_CANDIDATE})(?!\w)",
+            rf"\bbudget\s+(?:is\s+)?(?:up\s+to\s+)?"
+            rf"(?P<money>{_MONEY_CANDIDATE})(?!\w)",
+            rf"\b(?:under|below)\s+(?P<money>{_MONEY_CANDIDATE})(?!\w)",
         ]
     else:
         patterns = [
-            rf"\b(?:above|minimum|at\s+least)\s+(?P<money>{_MONEY_PATTERN})\b",
+            rf"\b(?:above|minimum|at\s+least)\s+"
+            rf"(?P<money>{_MONEY_CANDIDATE})(?!\w)",
         ]
 
     return _extract_first_money_match(text, patterns)
@@ -170,8 +212,8 @@ def _extract_money_limit(text: str, limit_type: str) -> Decimal | None:
 
 def _extract_max_down_payment(text: str) -> Decimal | None:
     patterns = [
-        rf"\bmax\s+down\s+payment\s+(?P<money>{_MONEY_PATTERN})\b",
-        rf"\bdown\s+payment\s+up\s+to\s+(?P<money>{_MONEY_PATTERN})\b",
+        rf"\bmax\s+down\s+payment\s+(?P<money>{_MONEY_CANDIDATE})(?!\w)",
+        rf"\bdown\s+payment\s+up\s+to\s+(?P<money>{_MONEY_CANDIDATE})(?!\w)",
     ]
     return _extract_first_money_match(text, patterns)
 
@@ -181,13 +223,34 @@ def _extract_first_money_match(text: str, patterns: list[str]) -> Decimal | None
 
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
-            parsed_value = normalize_money(match.group("money"))
-            if isinstance(parsed_value, Decimal):
-                values.add(parsed_value)
+            values.add(_parse_money(match.group("money")))
 
     if len(values) > 1:
-        raise ValueError(f"Conflicting money values found: {sorted(values)}")
+        raise SearchQueryParseError(
+            f"Conflicting money values found: {sorted(values)}"
+        )
     return next(iter(values), None)
+
+
+def _parse_money(raw_money: str) -> Decimal:
+    sentence = _MONEY_SENTENCE_BOUNDARY.fullmatch(raw_money)
+    if sentence is not None:
+        raw_money = sentence.group("money")
+    elif raw_money[-1] in ".,;:!?":
+        raw_money = raw_money[:-1]
+    match = _VALID_MONEY.fullmatch(raw_money)
+    if match is None:
+        raise SearchQueryParseError("Invalid or unsupported money value")
+
+    amount = Decimal(match.group("amount").replace(",", ""))
+    if match.group("scale") is None:
+        return amount
+    amount_tuple = amount.as_tuple()
+    return Decimal((
+        amount_tuple.sign,
+        amount_tuple.digits,
+        amount_tuple.exponent + 6,
+    ))
 
 
 def _extract_payment_method(text: str) -> str | None:
@@ -198,7 +261,9 @@ def _extract_payment_method(text: str) -> str | None:
     }
 
     if len(matches) > 1:
-        raise ValueError(f"Conflicting payment methods found: {sorted(matches)}")
+        raise SearchQueryParseError(
+            f"Conflicting payment methods found: {sorted(matches)}"
+        )
     return next(iter(matches), None)
 
 
@@ -215,5 +280,7 @@ def _extract_min_installment_years(text: str) -> Decimal | None:
             values.add(Decimal(match.group(1)))
 
     if len(values) > 1:
-        raise ValueError(f"Conflicting installment year values found: {sorted(values)}")
+        raise SearchQueryParseError(
+            f"Conflicting installment year values found: {sorted(values)}"
+        )
     return next(iter(values), None)

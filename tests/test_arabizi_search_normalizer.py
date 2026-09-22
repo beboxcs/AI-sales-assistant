@@ -118,6 +118,15 @@ def test_contradiction_or_negation_does_not_invent_flexibility(text):
     assert any(ambiguity.field is SearchField.LOCATION for ambiguity in intent.ambiguities)
 
 
+def test_negated_arabizi_location_is_suppressed():
+    intent = interpret_arabizi_search_query("mesh tagamo3")
+
+    assert intent.filters.location is None
+    assert [ambiguity.field for ambiguity in intent.ambiguities] == [
+        SearchField.LOCATION
+    ]
+
+
 @pytest.mark.parametrize("word", ["7awaly", "7awli", "ta2reban"])
 def test_approximate_price_remains_ambiguity_without_a_bound(word):
     intent = interpret_arabizi_search_query(f"{word} 6 million")

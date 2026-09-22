@@ -115,6 +115,15 @@ def test_contradictory_or_negated_semantics_do_not_create_flexibility(text):
     assert any(ambiguity.field is SearchField.LOCATION for ambiguity in intent.ambiguities)
 
 
+def test_negated_arabic_location_is_suppressed():
+    intent = interpret_arabic_search_query("مش التجمع")
+
+    assert intent.filters.location is None
+    assert [ambiguity.field for ambiguity in intent.ambiguities] == [
+        SearchField.LOCATION
+    ]
+
+
 @pytest.mark.parametrize("text, field", [
     ("حوالي ٦ مليون", SearchField.MAX_PRICE),
     ("تقريباً ٦ مليون", SearchField.MAX_PRICE),
