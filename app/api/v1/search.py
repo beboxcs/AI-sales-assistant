@@ -5,7 +5,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    ValidationError,
+    field_validator,
+)
 
 from app.ai_engine import search_application
 from app.ai_engine.search_filters import SearchFilters
@@ -15,6 +22,8 @@ from app.api.dependencies import (
     get_search_company_id,
 )
 from app.api.errors import APIError
+from app.api.security import get_current_user
+from app.auth.human.types import AuthenticatedUserContext
 from app.domain.enums import PaymentMethod
 from app.search.exceptions import (
     InvalidSearchScopeError,
@@ -137,6 +146,51 @@ class SearchResponse(BaseModel):
     results: list[SearchResultResponse]
 
 
+class NaturalLanguageSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: StrictStr = Field(max_length=500)
+
+
+class NaturalLanguageSearchFiltersResponse(BaseModel):
+    location: str | None
+    property_type: str | None
+    bedrooms: int | None
+    bathrooms: int | None
+    min_price: Decimal | None
+    max_price: Decimal | None
+    min_area_sqm: Decimal | None
+    max_area_sqm: Decimal | None
+    payment_method: str | None
+    max_down_payment: Decimal | None
+    min_installment_years: Decimal | None
+
+
+class NaturalLanguageSearchDirectiveResponse(BaseModel):
+    field: str
+    strength: str | None
+    preferred: bool
+    allow_alternative: bool
+
+
+class NaturalLanguageSearchAmbiguityResponse(BaseModel):
+    field: str | None
+    reason: str
+
+
+class NaturalLanguageSearchIntentResponse(BaseModel):
+    filters: NaturalLanguageSearchFiltersResponse
+    directives: list[NaturalLanguageSearchDirectiveResponse]
+    ambiguities: list[NaturalLanguageSearchAmbiguityResponse]
+    unsupported_requirements: list[str]
+
+
+class NaturalLanguageSearchResponse(BaseModel):
+    intent: NaturalLanguageSearchIntentResponse
+    executed: bool
+    results: list[SearchResultResponse] | None
+
+
 _SEARCH_REQUEST_OPENAPI = {
     "requestBody": {
         "required": True,
@@ -252,6 +306,102 @@ def search_units(
 
     return SearchResponse(
         results=[_project_search_result(item) for item in result.results]
+    )
+
+
+@router.post(
+    "/search/natural-language",
+    response_model=NaturalLanguageSearchResponse,
+)
+def natural_language_search_units(
+    request: NaturalLanguageSearchRequest,
+    authenticated_user: AuthenticatedUserContext = Depends(get_current_user),
+    resolve_context: SearchContextResolver = Depends(get_search_context_resolver),
+) -> NaturalLanguageSearchResponse:
+    try:
+        context = resolve_context(
+            company_id=authenticated_user.company_id,
+            requested_scope_keys=None,
+        )
+    except InvalidSearchScopeError as exc:
+        raise APIError(
+            status_code=404,
+            code="SEARCH_SCOPE_NOT_FOUND",
+            message="Search scope selection was not found",
+        ) from exc
+    except SearchScopeResolutionFailedError as exc:
+        raise APIError(
+            status_code=500,
+            code="SEARCH_CONTEXT_RESOLUTION_FAILED",
+            message="Search context could not be resolved",
+        ) from exc
+    except APIError:
+        raise
+    except Exception as exc:
+        raise APIError(
+            status_code=500,
+            code="SEARCH_CONTEXT_RESOLUTION_FAILED",
+            message="Search context could not be resolved",
+        ) from exc
+
+    try:
+        result = search_application.search_units_from_query(
+            text=request.query,
+            context=context,
+        )
+    except APIError:
+        raise
+    except Exception as exc:
+        raise APIError(
+            status_code=500,
+            code="SEARCH_FAILED",
+            message="Search could not be completed",
+        ) from exc
+
+    return NaturalLanguageSearchResponse(
+        intent=_project_natural_language_intent(result.intent),
+        executed=result.search is not None,
+        results=(
+            None
+            if result.search is None
+            else [_project_search_result(item) for item in result.search.results]
+        ),
+    )
+
+
+def _project_natural_language_intent(intent) -> NaturalLanguageSearchIntentResponse:
+    filters = intent.filters
+    return NaturalLanguageSearchIntentResponse(
+        filters=NaturalLanguageSearchFiltersResponse(
+            location=filters.location,
+            property_type=filters.property_type,
+            bedrooms=filters.bedrooms,
+            bathrooms=filters.bathrooms,
+            min_price=filters.min_price,
+            max_price=filters.max_price,
+            min_area_sqm=filters.min_area_sqm,
+            max_area_sqm=filters.max_area_sqm,
+            payment_method=filters.payment_method,
+            max_down_payment=filters.max_down_payment,
+            min_installment_years=filters.min_installment_years,
+        ),
+        directives=[
+            NaturalLanguageSearchDirectiveResponse(
+                field=_public_value(directive.field),
+                strength=_public_value(directive.strength),
+                preferred=directive.preferred,
+                allow_alternative=directive.allow_alternative,
+            )
+            for directive in intent.directives
+        ],
+        ambiguities=[
+            NaturalLanguageSearchAmbiguityResponse(
+                field=_public_value(ambiguity.field),
+                reason=ambiguity.reason,
+            )
+            for ambiguity in intent.ambiguities
+        ],
+        unsupported_requirements=list(intent.unsupported_requirements),
     )
 
 
