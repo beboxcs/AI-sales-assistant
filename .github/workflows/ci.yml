@@ -59,8 +59,8 @@ jobs:
       - name: Build application image
         run: docker compose build web
 
-      - name: Start PostgreSQL
-        run: docker compose up -d db
+      - name: Start PostgreSQL and Redis
+        run: docker compose up -d db redis
 
       - name: Wait for PostgreSQL
         shell: bash
@@ -79,6 +79,23 @@ jobs:
           docker compose logs db
           exit 1
 
+      - name: Wait for Redis
+        shell: bash
+        run: |
+          for i in {1..30}; do
+            if docker compose exec -T redis redis-cli ping; then
+              echo "Redis is ready."
+              exit 0
+            fi
+
+            echo "Waiting for Redis..."
+            sleep 2
+          done
+
+          echo "Redis did not become ready in time."
+          docker compose logs redis
+          exit 1
+
       - name: Run database migrations
         run: docker compose run --rm web alembic upgrade head
 
@@ -86,7 +103,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          docker compose run --rm web python -m pytest
+          docker compose run --rm -e B29_TEST_REDIS_URL=redis://redis:6379/15 web python -m pytest
           code=$?
           set -e
 

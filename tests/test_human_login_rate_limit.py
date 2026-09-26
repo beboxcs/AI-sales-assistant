@@ -739,6 +739,8 @@ def test_default_provider_fails_closed_for_unsafe_or_unsupported_storage(
 ):
     monkeypatch.setattr(rate_limit.settings, "APP_ENV", app_env)
     monkeypatch.setattr(rate_limit.settings, "LOGIN_RATE_LIMIT_BACKEND", backend)
+    if app_env == "production" and backend == "redis":
+        monkeypatch.setattr(rate_limit.settings, "REDIS_URL", "redis://redis:1/0")
     monkeypatch.setattr(
         rate_limit,
         "_default_provider",
