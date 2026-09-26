@@ -16,6 +16,9 @@ from app.ai_engine.search_strategy import ConstraintStrength, SearchField
     ("شقة ٣ غرف ٢ حمام", "apartment 3 bedrooms 2 bathrooms"),
     ("فيلا ۳ غرف ۲ حمام", "villa 3 bedrooms 2 bathrooms"),
     ("حوالي ٦ مليون", "around 6 million"),
+    ("على الأقل ١٢٠ متر مربع", "minimum 120 sqm"),
+    ("أقل من ٢٠٠ متر مربع", "under 200 sqm"),
+    ("شقة مفروشة", "apartment furnished"),
     ("التجمع مفضل بس مناطق تانية عادي",
      "New Cairo preferred but other locations are okay"),
     ("يفضل التجمع بس زايد عادي", "prefer New Cairo but Sheikh Zayed are okay"),
@@ -75,6 +78,23 @@ def test_plain_arabic_and_mixed_queries_extract_filters_without_inventing_direct
     assert intent.directives == []
     assert intent.ambiguities == []
     assert intent.unsupported_requirements == []
+
+
+def test_arabic_area_bounds_preserve_exact_decimal_values():
+    intent = interpret_arabic_search_query(
+        "على الأقل ١٢٠٫٥ متر مربع؛ أقل من ٢٠٠ متر مربع"
+    )
+
+    assert intent.filters.min_area_sqm == Decimal("120.5")
+    assert intent.filters.max_area_sqm == Decimal("200")
+    assert intent.ambiguities == []
+
+
+def test_arabic_furnished_is_preserved_as_unsupported_diagnostic():
+    intent = interpret_arabic_search_query("شقة مفروشة")
+
+    assert intent.filters == SearchFilters(property_type="Apartment")
+    assert intent.unsupported_requirements == ["furnished"]
 
 
 @pytest.mark.parametrize("text, expected", [

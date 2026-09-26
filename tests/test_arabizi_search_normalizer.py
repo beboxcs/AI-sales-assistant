@@ -24,6 +24,9 @@ from app.ai_engine.search_strategy import ConstraintStrength, SearchField
     ("ta2seet 8 sneen", "8 سنين تقسيط"),
     ("ta2sit ٨٫٥ senen", "٨٫٥ سنين تقسيط"),
     ("7awaly 6 million", "حوالي 6 million"),
+    ("3la el a2al 120 metr moraba3", "على الاقل 120 متر مربع"),
+    ("ta7t 200 meter moraba3", "أقل من 200 متر مربع"),
+    ("sha2a mafrosha", "شقة مفروشة"),
     ("yefadal التجمع; sea view", "يفضل التجمع; sea view"),
     ("zaied", "zayed"),
 ])
@@ -53,6 +56,23 @@ def test_plain_search_extracts_real_numbers_without_semantic_directives():
     )
     assert intent.directives == []
     assert intent.ambiguities == []
+
+
+def test_arabizi_area_bounds_preserve_exact_decimal_values():
+    intent = interpret_arabizi_search_query(
+        "3la el a2al 120.5 metr moraba3 and ta7t 200 metr moraba3"
+    )
+
+    assert intent.filters.min_area_sqm == Decimal("120.5")
+    assert intent.filters.max_area_sqm == Decimal("200")
+    assert intent.ambiguities == []
+
+
+def test_arabizi_furnished_is_preserved_as_unsupported_diagnostic():
+    intent = interpret_arabizi_search_query("sha2a mafrosha")
+
+    assert intent.filters == SearchFilters(property_type="Apartment")
+    assert intent.unsupported_requirements == ["furnished"]
 
 
 @pytest.mark.parametrize("word", ["lazem", "darory", "dorory"])

@@ -7,8 +7,11 @@ from app.ai_engine.search_intent_interpreter import interpret_search_query
 
 _PHRASES = {
     "bdwr 3la": "looking for",
+    "3la el a2al": "على الاقل",
     "manate2 tanya": "مناطق تانية",
     "mo2adam ta7t": "مقدم لحد",
+    "meter moraba3": "متر مربع",
+    "metr moraba3": "متر مربع",
     "3ayez": "want",
     "3awez": "want",
     "m7tag": "need",
@@ -18,6 +21,8 @@ _PHRASES = {
     "ta2seet": "تقسيط",
     "ta2sit": "تقسيط",
     "mo2adam": "مقدم",
+    "mafrosha": "مفروشة",
+    "mafrosh": "مفروش",
     "lazem": "لازم",
     "darory": "ضروري",
     "dorory": "ضروري",

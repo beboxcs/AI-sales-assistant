@@ -179,6 +179,128 @@ def test_parse_search_filters_extracts_installment_year_requirement():
     assert filters.min_installment_years == Decimal("8")
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("at least 120 sqm", "120"),
+        ("minimum 120.5 m2", "120.5"),
+        ("minimum area 1,200 sqm", "1200"),
+        ("above 120 m²", "120"),
+        ("over 120 SQM", "120"),
+        (
+            "at least 1234567890123456.78 sqm",
+            "1234567890123456.78",
+        ),
+    ],
+)
+def test_parse_search_filters_extracts_exact_minimum_area(text, expected):
+    filters = parse_search_filters(text)
+
+    assert filters.min_area_sqm == Decimal(expected)
+    assert isinstance(filters.min_area_sqm, Decimal)
+    assert filters.min_price is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("under 200 sqm", "200"),
+        ("below 200.25 m2", "200.25"),
+        ("max area 1,200 sqm", "1200"),
+        ("maximum area 200 m²", "200"),
+        ("area up to 200 SQM", "200"),
+    ],
+)
+def test_parse_search_filters_extracts_exact_maximum_area(text, expected):
+    filters = parse_search_filters(text)
+
+    assert filters.max_area_sqm == Decimal(expected)
+    assert isinstance(filters.max_area_sqm, Decimal)
+    assert filters.max_price is None
+
+
+@pytest.mark.parametrize(
+    ("text", "price_field", "price", "area_field", "area"),
+    [
+        (
+            "under 6 million and under 200 sqm",
+            "max_price",
+            "6000000",
+            "max_area_sqm",
+            "200",
+        ),
+        (
+            "above 4 million and at least 120 sqm",
+            "min_price",
+            "4000000",
+            "min_area_sqm",
+            "120",
+        ),
+    ],
+)
+def test_area_spans_do_not_change_independent_price_bounds(
+    text,
+    price_field,
+    price,
+    area_field,
+    area,
+):
+    filters = parse_search_filters(text)
+
+    assert getattr(filters, price_field) == Decimal(price)
+    assert getattr(filters, area_field) == Decimal(area)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "at least 120..5 sqm",
+        "under 12,00 sqm",
+        "above -120 sqm",
+        "over +120 sqm",
+        "under 0 sqm",
+        "max area 200 sqft",
+        "area up to 200",
+        "minimum area",
+    ],
+)
+def test_parse_search_filters_rejects_malformed_area(text):
+    with pytest.raises(SearchQueryParseError, match="area|Area"):
+        parse_search_filters(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "at least 120 sqm and above 130 sqm",
+        "under 200 sqm and below 190 sqm",
+    ],
+)
+def test_parse_search_filters_rejects_conflicting_repeated_area_bounds(text):
+    with pytest.raises(SearchQueryParseError, match="area"):
+        parse_search_filters(text)
+
+
+def test_repeated_identical_area_bounds_are_deterministic():
+    text = "at least 120 sqm and minimum 120 sqm"
+
+    assert parse_search_filters(text) == parse_search_filters(text)
+    assert parse_search_filters(text).min_area_sqm == Decimal("120")
+
+
+def test_non_area_numeric_fields_do_not_create_area_bounds():
+    filters = parse_search_filters(
+        "3 bedrooms 2 bathrooms installments over 8 years under 6 million"
+    )
+
+    assert filters.min_area_sqm is None
+    assert filters.max_area_sqm is None
+    assert filters.bedrooms == 3
+    assert filters.bathrooms == 2
+    assert filters.min_installment_years == Decimal("8")
+    assert filters.max_price == Decimal("6000000")
+
+
 def test_search_filters_model_validates_safe_bounds():
     with pytest.raises(ValueError):
         SearchFilters(max_price=-1)
