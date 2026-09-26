@@ -19,6 +19,8 @@ _PHRASES = (
     (r"6 اكتوبر|السادس من اكتوبر|اكتوبر", "6th of October"),
     (r"العاصمه الاداريه الجديده|العاصمه الاداريه", "New Capital"),
     (r"الساحل الشمالي", "North Coast"),
+    (r"متر مربع", "sqm"),
+    (r"مفروش|مفروشه", "furnished"),
     (r"مناطق (?:تانيه|اخري)", "other locations"),
     (r"انواع عقارات (?:تانيه|اخري)", "other property types"),
     (r"طرق دفع (?:تانيه|اخري)", "other payment methods"),

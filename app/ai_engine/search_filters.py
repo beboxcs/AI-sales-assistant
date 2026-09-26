@@ -113,10 +113,36 @@ _MONEY_SENTENCE_BOUNDARY = re.compile(
     r"(?P<money>.+\d)[.,;:!?]\s+\w+",
     re.IGNORECASE,
 )
+_AREA_VALUE = r"(?P<area>\S+?)\s*(?:sqm|m2|m²)(?!\w)"
+_AREA_BOUND_PATTERNS = (
+    (
+        "min_area_sqm",
+        re.compile(
+            rf"\b(?:at\s+least|above|over|minimum(?:\s+area)?)\s+{_AREA_VALUE}",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "max_area_sqm",
+        re.compile(
+            rf"\b(?:under|below|max(?:imum)?\s+area|area\s+up\s+to)\s+"
+            rf"{_AREA_VALUE}",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_EXPLICIT_AREA_CUE = re.compile(
+    r"\b(?:minimum\s+area|max(?:imum)?\s+area|area\s+up\s+to)\b",
+    re.IGNORECASE,
+)
+_VALID_AREA_NUMBER = re.compile(
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+)
 
 
 def parse_search_filters(text: str) -> SearchFilters:
     normalized_text = _normalize_text(text)
+    min_area_sqm, max_area_sqm, price_text = _extract_area_limits(normalized_text)
 
     bedrooms = _extract_integer_count(
         normalized_text,
@@ -135,8 +161,10 @@ def parse_search_filters(text: str) -> SearchFilters:
         property_type=_extract_property_type(normalized_text),
         bedrooms=bedrooms,
         bathrooms=bathrooms,
-        min_price=_extract_money_limit(normalized_text, limit_type="min_price"),
-        max_price=_extract_money_limit(normalized_text, limit_type="max_price"),
+        min_price=_extract_money_limit(price_text, limit_type="min_price"),
+        max_price=_extract_money_limit(price_text, limit_type="max_price"),
+        min_area_sqm=min_area_sqm,
+        max_area_sqm=max_area_sqm,
         payment_method=payment_method,
         max_down_payment=_extract_max_down_payment(normalized_text),
         min_installment_years=_extract_min_installment_years(normalized_text),
@@ -190,6 +218,49 @@ def _extract_integer_count(
             f"Conflicting {field_name} values found: {sorted(values)}"
         )
     return next(iter(values), None)
+
+
+def _extract_area_limits(
+    text: str,
+) -> tuple[Decimal | None, Decimal | None, str]:
+    values: dict[str, set[Decimal]] = {
+        "min_area_sqm": set(),
+        "max_area_sqm": set(),
+    }
+    spans: list[tuple[int, int]] = []
+
+    for field_name, pattern in _AREA_BOUND_PATTERNS:
+        for match in pattern.finditer(text):
+            values[field_name].add(_parse_area(match.group("area")))
+            spans.append(match.span())
+
+    for cue in _EXPLICIT_AREA_CUE.finditer(text):
+        if not any(start <= cue.start() < end for start, end in spans):
+            raise SearchQueryParseError("Invalid or unsupported area value")
+
+    for field_name, field_values in values.items():
+        if len(field_values) > 1:
+            raise SearchQueryParseError(
+                f"Conflicting {field_name} values found: {sorted(field_values)}"
+            )
+
+    price_text = list(text)
+    for start, end in spans:
+        price_text[start:end] = " " * (end - start)
+    return (
+        next(iter(values["min_area_sqm"]), None),
+        next(iter(values["max_area_sqm"]), None),
+        "".join(price_text),
+    )
+
+
+def _parse_area(raw_area: str) -> Decimal:
+    if _VALID_AREA_NUMBER.fullmatch(raw_area) is None:
+        raise SearchQueryParseError("Invalid or unsupported area value")
+    area = Decimal(raw_area.replace(",", ""))
+    if area <= 0:
+        raise SearchQueryParseError("Area must be greater than zero")
+    return area
 
 
 def _extract_money_limit(text: str, limit_type: str) -> Decimal | None:

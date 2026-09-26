@@ -25,18 +25,21 @@ _TARGET_PRICE = re.compile(
     r"\b(?:around|about|approximately|target(?:ing)?)\s+"
     r"(?:(?:budget|price)\s+)?(?:(?:is|of)\s+)?(?:egp\s*)?"
     r"\d[\d,]*(?:\.\d+)?(?:\s*(?:million|m|egp))?(?![\w.])"
-    r"(?!\s*(?:years?|bedrooms?|bathrooms?|br|sqm|m2|sqft|square)\b)"
+    r"(?!\s*(?:years?|bedrooms?|bathrooms?|br|sqm|m2|m²|sqft|square)\b)"
 )
 _TARGET_COUNT = re.compile(
     r"\b(?:around|about|approximately|target(?:ing)?)\s+\d+(?:\.\d+)?\s+"
     r"(?:(?P<min_installment_years>years?)|(?P<bedrooms>bedrooms?|br)|"
-    r"(?P<bathrooms>bathrooms?)|(?P<min_area_sqm>sqm|m2|sqft|square\s+meters?))\b"
+    r"(?P<bathrooms>bathrooms?)|(?P<min_area_sqm>sqm|m2|m²|sqft|square\s+meters?))\b"
 )
 _MINIMUM_YEARS = re.compile(r"\bminimum\s+(\d+(?:\.\d+)?)\s+years?\b")
 _CLAUSE_BREAK = re.compile(r"\b(?:but|and)\b|[;!?]|\.(?!\d)|,(?!\d)")
 _NEGATED_VALUE = re.compile(
     r"\b(?:not|no|except)\s+"
     r"(?!(?:prefer(?:red)?|flexible|required|mandatory|must|only)\b)(.+)"
+)
+_FURNISHING_NEGATION = re.compile(
+    r"\b(?:not|no|except)\s+(?:an?\s+)?furnished\b"
 )
 _SEMANTICS = (
     ("hard", r"\b(?:must(?:\s+(?:be|have))?|must-have|only|required?|mandatory)\s+(.+)",
@@ -72,7 +75,9 @@ _VAGUE_NUMERICS = (
     (SearchField.MIN_INSTALLMENT_YEARS, r"\blong\s+installments?\b",
      "Installment duration needs a precise numeric value."),
 )
+_FURNISHED = r"\bfurnished\b"
 _UNSUPPORTED = (
+    ("furnished", _FURNISHED),
     ("sea view", r"\bsea[ -]view\b"),
     ("near school", r"\bnear\s+(?:a\s+|the\s+)?schools?\b"),
     ("near metro", r"\bnear\s+(?:a\s+|the\s+)?metro\b"),
@@ -91,7 +96,7 @@ def interpret_search_query(text: str) -> ParsedSearchIntent:
     ambiguities: list[SearchAmbiguity] = []
     filters = _extract_filters(normalized, ambiguities)
     filters = _suppress_negated_filters(normalized, filters, ambiguities)
-    _record_contradictory_price_range(filters, ambiguities)
+    _record_contradictory_ranges(filters, ambiguities)
     directives = _detect_directives(normalized, filters, ambiguities)
     for field, pattern, reason in _VAGUE_NUMERICS:
         if getattr(filters, field.value) is None and re.search(pattern, normalized):
@@ -174,6 +179,7 @@ def _suppress_negated_filters(
 ) -> SearchFilters:
     suppressed: set[SearchField] = set()
     for clause in _CLAUSE_BREAK.split(text):
+        clause = _FURNISHING_NEGATION.sub(" ", clause)
         match = _NEGATED_VALUE.search(clause)
         negated = _try_parse(match[1]) if match else None
         if negated is None:
@@ -201,7 +207,7 @@ def _suppress_negated_filters(
     })
 
 
-def _record_contradictory_price_range(
+def _record_contradictory_ranges(
     filters: SearchFilters,
     ambiguities: list[SearchAmbiguity],
 ) -> None:
@@ -214,6 +220,17 @@ def _record_contradictory_price_range(
             SearchAmbiguity(
                 field=SearchField.MAX_PRICE,
                 reason="Minimum price must not exceed maximum price.",
+            )
+        )
+    if (
+        filters.min_area_sqm is not None
+        and filters.max_area_sqm is not None
+        and filters.min_area_sqm > filters.max_area_sqm
+    ):
+        ambiguities.append(
+            SearchAmbiguity(
+                field=SearchField.MAX_AREA_SQM,
+                reason="Minimum area must not exceed maximum area.",
             )
         )
 

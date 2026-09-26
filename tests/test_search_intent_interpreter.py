@@ -184,6 +184,7 @@ def test_approximate_duration_preference_does_not_become_payment_method_preferen
     ("around 3 bedrooms", SearchField.BEDROOMS),
     ("around 2 bathrooms", SearchField.BATHROOMS),
     ("around 120 sqm", SearchField.MIN_AREA_SQM),
+    ("around 120 m²", SearchField.MIN_AREA_SQM),
 ])
 def test_approximate_non_price_numbers_do_not_become_exact_filters(text, field):
     intent = interpret_search_query(text)
@@ -344,6 +345,38 @@ def test_valid_price_range_remains_unambiguous(text, minimum, maximum):
     assert intent.ambiguities == []
 
 
+def test_inverted_area_range_is_preserved_as_ambiguity():
+    intent = interpret_search_query("minimum 200 sqm under 120 sqm")
+
+    assert intent.filters.min_area_sqm == Decimal("200")
+    assert intent.filters.max_area_sqm == Decimal("120")
+    assert [ambiguity.field for ambiguity in intent.ambiguities] == [
+        SearchField.MAX_AREA_SQM
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "minimum", "maximum"),
+    [
+        ("minimum 120 sqm under 200 sqm", "120", "200"),
+        ("minimum 120 sqm under 120 sqm", "120", "120"),
+    ],
+)
+def test_valid_area_range_remains_unambiguous(text, minimum, maximum):
+    intent = interpret_search_query(text)
+
+    assert intent.filters.min_area_sqm == Decimal(minimum)
+    assert intent.filters.max_area_sqm == Decimal(maximum)
+    assert intent.ambiguities == []
+
+
+def test_malformed_area_returns_controlled_ambiguity():
+    intent = interpret_search_query("apartment under 12,00 sqm")
+
+    assert intent.filters.model_dump(exclude_none=True) == {}
+    assert intent.ambiguities
+
+
 def test_repeated_identical_bound_is_deterministic():
     text = "under 6 million under 6 million"
     first = interpret_search_query(text)
@@ -378,6 +411,52 @@ def test_unsupported_requirement_is_recorded_without_a_filter_mapping(requiremen
     assert intent.unsupported_requirements == [requirement]
     assert intent.filters.model_dump(exclude_none=True) == {}
     assert intent.directives == []
+
+
+@pytest.mark.parametrize(
+    ("text", "property_type"),
+    [
+        ("furnished", None),
+        ("furnished apartment", "Apartment"),
+        ("not furnished", None),
+        ("not furnished apartment", "Apartment"),
+    ],
+)
+def test_furnished_is_unsupported_without_inventing_inverse_semantics(
+    text,
+    property_type,
+):
+    intent = interpret_search_query(text)
+
+    assert intent.filters.property_type == property_type
+    assert intent.unsupported_requirements == ["furnished"]
+    assert intent.ambiguities == []
+
+
+@pytest.mark.parametrize(
+    ("text", "property_type", "suppressed_field"),
+    [
+        (
+            "not furnished apartment not New Cairo",
+            "Apartment",
+            SearchField.LOCATION,
+        ),
+        ("not furnished villa no cash", "Villa", SearchField.PAYMENT_METHOD),
+    ],
+)
+def test_furnishing_negation_does_not_hide_later_supported_negation(
+    text,
+    property_type,
+    suppressed_field,
+):
+    intent = interpret_search_query(text)
+
+    assert intent.filters.property_type == property_type
+    assert getattr(intent.filters, suppressed_field.value) is None
+    assert intent.unsupported_requirements == ["furnished"]
+    assert [ambiguity.field for ambiguity in intent.ambiguities] == [
+        suppressed_field
+    ]
 
 
 def test_required_quiet_area_does_not_make_an_existing_location_hard():
