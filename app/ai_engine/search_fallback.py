@@ -216,8 +216,30 @@ class UntrustedSearchProposal(_ProposalModel):
     directives: tuple[ProposedSearchDirective, ...] = ()
 
 
+class SearchProposalValidationErrorKind(str, Enum):
+    EVIDENCE_OUT_OF_RANGE = "evidence_out_of_range"
+    EVIDENCE_BLANK = "evidence_blank"
+    EVIDENCE_AMBIGUOUS = "evidence_ambiguous"
+    EVIDENCE_MISMATCH = "evidence_mismatch"
+    UNSUPPORTED_CATEGORICAL = "unsupported_categorical"
+    INVALID_FILTER_VALUE = "invalid_filter_value"
+    CONTRADICTORY_BOUNDS = "contradictory_bounds"
+    INVALID_DIRECTIVE = "invalid_directive"
+
+
 class SearchProposalValidationError(ValueError):
     """Raised when an untrusted semantic proposal lacks deterministic support."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: SearchProposalValidationErrorKind,
+        fields: tuple[SearchField, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.fields = fields
 
 
 _CATEGORICAL_VALUES = {
@@ -240,7 +262,11 @@ def validate_search_proposal(
     try:
         return ParsedSearchIntent(filters=filters, directives=directives)
     except ValidationError as exc:
-        raise SearchProposalValidationError("invalid proposed intent") from exc
+        raise SearchProposalValidationError(
+            "invalid proposed intent",
+            kind=SearchProposalValidationErrorKind.INVALID_DIRECTIVE,
+            fields=tuple(directive.field for directive in directives),
+        ) from exc
 
 
 def _validate_proposed_filters(
@@ -257,19 +283,36 @@ def _validate_proposed_filters(
             and proposed.value not in _CATEGORICAL_VALUES[field]
         ):
             raise SearchProposalValidationError(
-                f"unsupported categorical value for {field.value}"
+                f"unsupported categorical value for {field.value}",
+                kind=SearchProposalValidationErrorKind.UNSUPPORTED_CATEGORICAL,
+                fields=(field,),
             )
-        evidence_intent = _interpret_evidence(proposed.evidence, original_text)
+        evidence_intent = _interpret_evidence(
+            proposed.evidence,
+            original_text,
+            field,
+        )
         if getattr(evidence_intent.filters, field.value) != proposed.value:
             raise SearchProposalValidationError(
-                f"evidence does not support proposed {field.value}"
+                f"evidence does not support proposed {field.value}",
+                kind=SearchProposalValidationErrorKind.EVIDENCE_MISMATCH,
+                fields=(field,),
             )
         proposed_values[field.value] = proposed.value
 
     try:
         filters = SearchFilters(**proposed_values)
     except ValidationError as exc:
-        raise SearchProposalValidationError("invalid proposed filter value") from exc
+        invalid_fields = tuple(
+            SearchField(error["loc"][0])
+            for error in exc.errors()
+            if error["loc"] and error["loc"][0] in SearchField._value2member_map_
+        )
+        raise SearchProposalValidationError(
+            "invalid proposed filter value",
+            kind=SearchProposalValidationErrorKind.INVALID_FILTER_VALUE,
+            fields=invalid_fields,
+        ) from exc
     _validate_proposed_ranges(filters)
     return filters
 
@@ -280,13 +323,21 @@ def _validate_proposed_ranges(filters: SearchFilters) -> None:
         and filters.max_price is not None
         and filters.min_price > filters.max_price
     ):
-        raise SearchProposalValidationError("contradictory proposed price bounds")
+        raise SearchProposalValidationError(
+            "contradictory proposed price bounds",
+            kind=SearchProposalValidationErrorKind.CONTRADICTORY_BOUNDS,
+            fields=(SearchField.MIN_PRICE, SearchField.MAX_PRICE),
+        )
     if (
         filters.min_area_sqm is not None
         and filters.max_area_sqm is not None
         and filters.min_area_sqm > filters.max_area_sqm
     ):
-        raise SearchProposalValidationError("contradictory proposed area bounds")
+        raise SearchProposalValidationError(
+            "contradictory proposed area bounds",
+            kind=SearchProposalValidationErrorKind.CONTRADICTORY_BOUNDS,
+            fields=(SearchField.MIN_AREA_SQM, SearchField.MAX_AREA_SQM),
+        )
 
 
 def _validate_proposed_directives(
@@ -302,14 +353,20 @@ def _validate_proposed_directives(
             preferred=proposed.preferred,
             allow_alternative=proposed.allow_alternative,
         )
-        evidence_intent = _interpret_evidence(proposed.evidence, original_text)
+        evidence_intent = _interpret_evidence(
+            proposed.evidence,
+            original_text,
+            proposed.field,
+        )
         if (
             directive not in evidence_intent.directives
             or getattr(evidence_intent.filters, proposed.field.value)
             != getattr(filters, proposed.field.value)
         ):
             raise SearchProposalValidationError(
-                f"evidence does not support proposed {proposed.field.value} directive"
+                f"evidence does not support proposed {proposed.field.value} directive",
+                kind=SearchProposalValidationErrorKind.EVIDENCE_MISMATCH,
+                fields=(proposed.field,),
             )
         directives.append(directive)
     return directives
@@ -318,13 +375,26 @@ def _validate_proposed_directives(
 def _interpret_evidence(
     evidence: EvidenceSpan,
     original_text: str,
+    field: SearchField,
 ) -> ParsedSearchIntent:
     if evidence.end > len(original_text):
-        raise SearchProposalValidationError("evidence is outside the original query")
+        raise SearchProposalValidationError(
+            "evidence is outside the original query",
+            kind=SearchProposalValidationErrorKind.EVIDENCE_OUT_OF_RANGE,
+            fields=(field,),
+        )
     evidence_text = original_text[evidence.start:evidence.end]
     if not evidence_text.strip():
-        raise SearchProposalValidationError("evidence must not be blank")
+        raise SearchProposalValidationError(
+            "evidence must not be blank",
+            kind=SearchProposalValidationErrorKind.EVIDENCE_BLANK,
+            fields=(field,),
+        )
     intent = interpret_multilingual_search_query(evidence_text)
     if intent.ambiguities:
-        raise SearchProposalValidationError("evidence is ambiguous")
+        raise SearchProposalValidationError(
+            "evidence is ambiguous",
+            kind=SearchProposalValidationErrorKind.EVIDENCE_AMBIGUOUS,
+            fields=(field,),
+        )
     return intent
