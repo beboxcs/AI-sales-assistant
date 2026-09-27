@@ -13,6 +13,7 @@ from app.ai_engine.search_fallback import (
     ProposedSearchFilters,
     ProposedTextValue,
     SearchProposalValidationError,
+    SearchProposalValidationErrorKind,
     UntrustedSearchProposal,
     decide_search_fallback,
     validate_search_proposal,
@@ -250,8 +251,11 @@ def test_proposal_rejects_evidence_outside_original_query():
         )
     )
 
-    with pytest.raises(SearchProposalValidationError, match="outside"):
+    with pytest.raises(SearchProposalValidationError, match="outside") as raised:
         validate_search_proposal(proposal, "New Cairo")
+
+    assert raised.value.kind is SearchProposalValidationErrorKind.EVIDENCE_OUT_OF_RANGE
+    assert raised.value.fields == (SearchField.LOCATION,)
 
 
 def test_validated_proposal_preserves_exact_decimal_and_directive():
@@ -321,8 +325,13 @@ def test_proposal_rejects_unsupported_categorical_values(field, value, text):
         })
     )
 
-    with pytest.raises(SearchProposalValidationError, match="categorical"):
+    with pytest.raises(SearchProposalValidationError, match="categorical") as raised:
         validate_search_proposal(proposal, text)
+
+    assert (
+        raised.value.kind
+        is SearchProposalValidationErrorKind.UNSUPPORTED_CATEGORICAL
+    )
 
 
 def test_proposal_rejects_negated_evidence_instead_of_inventing_inverse_semantics():
@@ -336,8 +345,10 @@ def test_proposal_rejects_negated_evidence_instead_of_inventing_inverse_semantic
         )
     )
 
-    with pytest.raises(SearchProposalValidationError, match="ambiguous"):
+    with pytest.raises(SearchProposalValidationError, match="ambiguous") as raised:
         validate_search_proposal(proposal, text)
+
+    assert raised.value.kind is SearchProposalValidationErrorKind.EVIDENCE_AMBIGUOUS
 
 
 def test_proposal_rejects_contradictory_numeric_bounds():
@@ -358,8 +369,10 @@ def test_proposal_rejects_contradictory_numeric_bounds():
         )
     )
 
-    with pytest.raises(SearchProposalValidationError, match="contradictory"):
+    with pytest.raises(SearchProposalValidationError, match="contradictory") as raised:
         validate_search_proposal(proposal, text)
+
+    assert raised.value.kind is SearchProposalValidationErrorKind.CONTRADICTORY_BOUNDS
 
 
 def test_directive_evidence_must_support_existing_semantics():
@@ -380,8 +393,10 @@ def test_directive_evidence_must_support_existing_semantics():
         ),
     )
 
-    with pytest.raises(SearchProposalValidationError, match="directive"):
+    with pytest.raises(SearchProposalValidationError, match="directive") as raised:
         validate_search_proposal(proposal, text)
+
+    assert raised.value.kind is SearchProposalValidationErrorKind.EVIDENCE_MISMATCH
 
 
 def test_directive_evidence_must_reference_the_proposed_filter_value():
@@ -405,5 +420,31 @@ def test_directive_evidence_must_reference_the_proposed_filter_value():
         ),
     )
 
-    with pytest.raises(SearchProposalValidationError, match="directive"):
+    with pytest.raises(SearchProposalValidationError, match="directive") as raised:
         validate_search_proposal(proposal, text)
+
+    assert raised.value.kind is SearchProposalValidationErrorKind.EVIDENCE_MISMATCH
+
+
+def test_duplicate_valid_directives_have_typed_invalid_directive_rejection():
+    text = "New Cairo preferred"
+    evidence = EvidenceSpan(start=0, end=len(text))
+    directive = ProposedSearchDirective(
+        field=SearchField.LOCATION,
+        preferred=True,
+        evidence=evidence,
+    )
+    proposal = UntrustedSearchProposal(
+        filters=ProposedSearchFilters(
+            location=ProposedTextValue(
+                value="New Cairo",
+                evidence=evidence,
+            )
+        ),
+        directives=(directive, directive),
+    )
+
+    with pytest.raises(SearchProposalValidationError) as raised:
+        validate_search_proposal(proposal, text)
+
+    assert raised.value.kind is SearchProposalValidationErrorKind.INVALID_DIRECTIVE
