@@ -1,7 +1,21 @@
+from enum import Enum
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.ai_engine.search_filters import SearchFilters
 from app.ai_engine.search_strategy import ConstraintStrength, SearchField
+
+
+class SearchAmbiguityKind(str, Enum):
+    PARSER_ERROR = "parser_error"
+    CONTRADICTORY_BOUNDS = "contradictory_bounds"
+    EXCLUSION_NOT_REPRESENTABLE = "exclusion_not_representable"
+    VAGUE_NUMERIC = "vague_numeric"
+    MULTIPLE_EXPLICIT_VALUES = "multiple_explicit_values"
+    SEMANTIC_CONTRADICTION = "semantic_contradiction"
+    UNREPRESENTABLE_ALTERNATIVE = "unrepresentable_alternative"
+    UNRECOGNIZED_SUBJECT = "unrecognized_subject"
+    UNCLASSIFIED = "unclassified"
 
 
 class SearchFieldDirective(BaseModel):
@@ -32,6 +46,7 @@ class SearchFieldDirective(BaseModel):
 class SearchAmbiguity(BaseModel):
     field: SearchField | None = None
     reason: str
+    kind: SearchAmbiguityKind = SearchAmbiguityKind.UNCLASSIFIED
 
     @field_validator("reason")
     @classmethod

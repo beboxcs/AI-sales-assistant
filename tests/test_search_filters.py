@@ -5,6 +5,7 @@ import pytest
 from app.ai_engine.search_filters import (
     SearchFilters,
     SearchQueryParseError,
+    SearchQueryParseErrorKind,
     parse_search_filters,
 )
 
@@ -86,8 +87,10 @@ def test_parse_search_filters_leaves_unspecified_fields_empty():
 
 
 def test_parse_search_filters_raises_for_conflicting_bedroom_values():
-    with pytest.raises(SearchQueryParseError, match="bedroom"):
+    with pytest.raises(SearchQueryParseError, match="bedroom") as raised:
         parse_search_filters("2 bedrooms and 3 bedrooms")
+
+    assert raised.value.kind is SearchQueryParseErrorKind.CONFLICTING_VALUES
 
 
 def test_parse_search_filters_raises_for_conflicting_payment_methods():
@@ -111,8 +114,10 @@ def test_parse_search_filters_raises_for_conflicting_payment_methods():
     ],
 )
 def test_parse_search_filters_rejects_malformed_or_unsupported_money(money):
-    with pytest.raises(SearchQueryParseError, match="money"):
+    with pytest.raises(SearchQueryParseError, match="money") as raised:
         parse_search_filters(f"under {money}")
+
+    assert raised.value.kind is SearchQueryParseErrorKind.INVALID_SYNTAX
 
 
 @pytest.mark.parametrize(

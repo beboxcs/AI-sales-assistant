@@ -5,7 +5,7 @@ import pytest
 
 from app.ai_engine import search_intent_interpreter
 from app.ai_engine.search_filters import SearchQueryParseError, parse_search_filters
-from app.ai_engine.search_intent import SearchFieldDirective
+from app.ai_engine.search_intent import SearchAmbiguityKind, SearchFieldDirective
 from app.ai_engine.search_intent_interpreter import interpret_search_query
 from app.ai_engine.search_strategy import ConstraintStrength, SearchField
 
@@ -527,3 +527,28 @@ def test_unpopulated_semantic_subject_is_ambiguous_not_an_invented_filter():
     assert intent.filters.location is None
     assert intent.directives == []
     assert intent.ambiguities
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("apartment under 6..5 million", SearchAmbiguityKind.PARSER_ERROR),
+        ("2 bedrooms and 3 bedrooms", SearchAmbiguityKind.MULTIPLE_EXPLICIT_VALUES),
+        ("above 8 million under 6 million", SearchAmbiguityKind.CONTRADICTORY_BOUNDS),
+        ("not New Cairo", SearchAmbiguityKind.EXCLUSION_NOT_REPRESENTABLE),
+        ("cheap apartment", SearchAmbiguityKind.VAGUE_NUMERIC),
+        (
+            "New Cairo preferred but Sheikh Zayed is okay",
+            SearchAmbiguityKind.UNREPRESENTABLE_ALTERNATIVE,
+        ),
+        (
+            "only New Cairo and New Cairo preferred",
+            SearchAmbiguityKind.SEMANTIC_CONTRADICTION,
+        ),
+        ("must be in Gardenia", SearchAmbiguityKind.UNRECOGNIZED_SUBJECT),
+    ],
+)
+def test_ambiguity_kind_is_assigned_at_its_origin(text, kind):
+    intent = interpret_search_query(text)
+
+    assert kind in {ambiguity.kind for ambiguity in intent.ambiguities}

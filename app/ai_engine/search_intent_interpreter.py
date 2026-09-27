@@ -6,12 +6,14 @@ from pydantic import ValidationError
 from app.ai_engine.search_filters import (
     LOCATION_ALIASES,
     SearchQueryParseError,
+    SearchQueryParseErrorKind,
     SearchFilters,
     parse_search_filters,
 )
 from app.ai_engine.search_intent import (
     ParsedSearchIntent,
     SearchAmbiguity,
+    SearchAmbiguityKind,
     SearchFieldDirective,
 )
 from app.ai_engine.search_strategy import ConstraintStrength, SearchField
@@ -100,7 +102,11 @@ def interpret_search_query(text: str) -> ParsedSearchIntent:
     directives = _detect_directives(normalized, filters, ambiguities)
     for field, pattern, reason in _VAGUE_NUMERICS:
         if getattr(filters, field.value) is None and re.search(pattern, normalized):
-            ambiguities.append(SearchAmbiguity(field=field, reason=reason))
+            ambiguities.append(SearchAmbiguity(
+                field=field,
+                reason=reason,
+                kind=SearchAmbiguityKind.VAGUE_NUMERIC,
+            ))
     field_order = {field: index for index, field in enumerate(SearchField)}
     return ParsedSearchIntent(
         filters=filters,
@@ -131,12 +137,14 @@ def _extract_filters(text: str, ambiguities: list[SearchAmbiguity]) -> SearchFil
         ambiguities.append(SearchAmbiguity(
             field=SearchField(match.lastgroup),
             reason="An approximate value does not specify an exact requirement or bound.",
+            kind=SearchAmbiguityKind.VAGUE_NUMERIC,
         ))
     corrected = _TARGET_COUNT.sub(" ", corrected)
     if _TARGET_PRICE.search(text):
         ambiguities.append(SearchAmbiguity(
             field=SearchField.MAX_PRICE,
             reason="A target price does not specify a minimum or maximum price.",
+            kind=SearchAmbiguityKind.VAGUE_NUMERIC,
         ))
         corrected = _TARGET_PRICE.sub(" ", corrected)
     locations = {LOCATION_ALIASES[match[0]] for match in _LOCATION.finditer(text)}
@@ -144,15 +152,29 @@ def _extract_filters(text: str, ambiguities: list[SearchAmbiguity]) -> SearchFil
         ambiguities.append(SearchAmbiguity(
             field=SearchField.LOCATION,
             reason="Multiple explicit location alternatives are not representable by the current contract.",
+            kind=SearchAmbiguityKind.UNREPRESENTABLE_ALTERNATIVE,
         ))
         corrected = _LOCATION.sub(" ", corrected)
     filters = _try_parse(corrected) if corrected != text else baseline
     if filters is None:
         ambiguities.append(SearchAmbiguity(
             reason="The query contains conflicting or invalid structured filter values.",
+            kind=_parse_failure_kind(corrected),
         ))
         return SearchFilters()
     return _suppress_year_price(corrected, filters)
+
+
+def _parse_failure_kind(text: str) -> SearchAmbiguityKind:
+    try:
+        parse_search_filters(text)
+    except SearchQueryParseError as exc:
+        if exc.kind is SearchQueryParseErrorKind.CONFLICTING_VALUES:
+            return SearchAmbiguityKind.MULTIPLE_EXPLICIT_VALUES
+        return SearchAmbiguityKind.PARSER_ERROR
+    except ValidationError:
+        return SearchAmbiguityKind.PARSER_ERROR
+    return SearchAmbiguityKind.UNCLASSIFIED
 
 
 def _suppress_year_price(text: str, filters: SearchFilters) -> SearchFilters:
@@ -200,6 +222,7 @@ def _suppress_negated_filters(
                 SearchAmbiguity(
                     field=field,
                     reason="Exclusion of a supported value is not representable.",
+                    kind=SearchAmbiguityKind.EXCLUSION_NOT_REPRESENTABLE,
                 )
             )
     return filters.model_copy(update={
@@ -220,6 +243,7 @@ def _record_contradictory_ranges(
             SearchAmbiguity(
                 field=SearchField.MAX_PRICE,
                 reason="Minimum price must not exceed maximum price.",
+                kind=SearchAmbiguityKind.CONTRADICTORY_BOUNDS,
             )
         )
     if (
@@ -231,6 +255,7 @@ def _record_contradictory_ranges(
             SearchAmbiguity(
                 field=SearchField.MAX_AREA_SQM,
                 reason="Minimum area must not exceed maximum area.",
+                kind=SearchAmbiguityKind.CONTRADICTORY_BOUNDS,
             )
         )
 
@@ -270,6 +295,7 @@ def _detect_directives(
             if len(fields) != 1:
                 ambiguities.append(SearchAmbiguity(
                     reason="Semantic wording does not unambiguously identify a supported requirement.",
+                    kind=SearchAmbiguityKind.UNRECOGNIZED_SUBJECT,
                 ))
                 continue
             flags.setdefault(fields[0], set()).add(
@@ -297,12 +323,14 @@ def _directives_from_flags(
             ambiguities.append(SearchAmbiguity(
                 field=field,
                 reason="Negated or restricted semantic wording needs clarification.",
+                kind=SearchAmbiguityKind.SEMANTIC_CONTRADICTION,
             ))
             continue
         if "hard" in semantics and len(semantics) > 1:
             ambiguities.append(SearchAmbiguity(
                 field=field,
                 reason="A required field cannot also be preferred or flexible.",
+                kind=SearchAmbiguityKind.SEMANTIC_CONTRADICTION,
             ))
             continue
         directives.append(SearchFieldDirective(
