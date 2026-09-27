@@ -4,6 +4,11 @@ from decimal import Decimal
 import pytest
 
 from app.ai_engine.search_application import search_units_from_query
+from app.ai_engine.search_fallback import (
+    FallbackDisposition,
+    FallbackReason,
+    decide_search_fallback,
+)
 from app.ai_engine.search_strategy import ConstraintStrength, SearchField
 from app.search import service as search_service
 from app.search.contracts import PriceBasis, SearchExecutionContext
@@ -39,6 +44,8 @@ class GoldenQueryCase:
     execute: bool = False
     equivalence_group: str | None = None
     expected_price_basis: PriceBasis | None = None
+    expected_fallback_disposition: FallbackDisposition | None = None
+    expected_fallback_reason: FallbackReason | None = None
 
 
 GOLDEN_CASES = (
@@ -57,6 +64,8 @@ GOLDEN_CASES = (
         execute=True,
         equivalence_group="basic-search",
         expected_price_basis=PriceBasis.PLAN_TOTAL_PRICE,
+        expected_fallback_disposition=FallbackDisposition.SKIP,
+        expected_fallback_reason=FallbackReason.DETERMINISTIC_SUPPORTED,
     ),
     GoldenQueryCase(
         case_id="en-bathrooms",
@@ -190,6 +199,8 @@ GOLDEN_CASES = (
         expected_ambiguities=(
             AmbiguityExpectation(SearchField.MAX_PRICE, "precise numeric value"),
         ),
+        expected_fallback_disposition=FallbackDisposition.SHADOW_ONLY,
+        expected_fallback_reason=FallbackReason.VAGUE_NUMERIC,
     ),
     GoldenQueryCase(
         case_id="en-vague-area",
@@ -210,6 +221,8 @@ GOLDEN_CASES = (
         expected_ambiguities=(
             AmbiguityExpectation(SearchField.LOCATION, "not representable"),
         ),
+        expected_fallback_disposition=FallbackDisposition.FORBIDDEN,
+        expected_fallback_reason=FallbackReason.EXCLUSION_NOT_REPRESENTABLE,
     ),
     GoldenQueryCase(
         case_id="en-negated-cash",
@@ -232,6 +245,8 @@ GOLDEN_CASES = (
         expected_ambiguities=(
             AmbiguityExpectation(SearchField.MAX_PRICE, "must not exceed"),
         ),
+        expected_fallback_disposition=FallbackDisposition.FORBIDDEN,
+        expected_fallback_reason=FallbackReason.CONTRADICTORY_BOUNDS,
     ),
     GoldenQueryCase(
         case_id="en-conflicting-bedrooms",
@@ -241,6 +256,8 @@ GOLDEN_CASES = (
         expected_ambiguities=(
             AmbiguityExpectation(None, "conflicting or invalid"),
         ),
+        expected_fallback_disposition=FallbackDisposition.FORBIDDEN,
+        expected_fallback_reason=FallbackReason.MULTIPLE_EXPLICIT_VALUES,
     ),
     GoldenQueryCase(
         case_id="en-malformed-money",
@@ -250,6 +267,8 @@ GOLDEN_CASES = (
         expected_ambiguities=(
             AmbiguityExpectation(None, "conflicting or invalid"),
         ),
+        expected_fallback_disposition=FallbackDisposition.FORBIDDEN,
+        expected_fallback_reason=FallbackReason.PARSER_ERROR,
     ),
     GoldenQueryCase(
         case_id="en-conflicting-locations",
@@ -292,12 +311,16 @@ GOLDEN_CASES = (
         language="english",
         category="eligibility",
         query="X7Unknown",
+        expected_fallback_disposition=FallbackDisposition.PROPOSAL_ELIGIBLE,
+        expected_fallback_reason=FallbackReason.UNKNOWN_ONLY,
     ),
     GoldenQueryCase(
         case_id="blank-query",
         language="none",
         category="eligibility",
         query="  \t\n ",
+        expected_fallback_disposition=FallbackDisposition.FORBIDDEN,
+        expected_fallback_reason=FallbackReason.BLANK_QUERY,
     ),
     GoldenQueryCase(
         case_id="en-furnished-only",
@@ -305,6 +328,8 @@ GOLDEN_CASES = (
         category="unsupported",
         query="furnished",
         expected_unsupported=("furnished",),
+        expected_fallback_disposition=FallbackDisposition.SHADOW_ONLY,
+        expected_fallback_reason=FallbackReason.UNSUPPORTED_ONLY,
     ),
     GoldenQueryCase(
         case_id="en-furnished-apartment",
@@ -316,6 +341,8 @@ GOLDEN_CASES = (
         execute=True,
         equivalence_group="furnished-apartment",
         expected_price_basis=PriceBasis.BASE_PRICE,
+        expected_fallback_disposition=FallbackDisposition.SHADOW_ONLY,
+        expected_fallback_reason=FallbackReason.SUPPORTED_WITH_UNSUPPORTED,
     ),
     GoldenQueryCase(
         case_id="en-furnished-apartment-cash",
@@ -362,6 +389,8 @@ GOLDEN_CASES = (
         expected_ambiguities=(
             AmbiguityExpectation(SearchField.MAX_AREA_SQM, "must not exceed"),
         ),
+        expected_fallback_disposition=FallbackDisposition.FORBIDDEN,
+        expected_fallback_reason=FallbackReason.CONTRADICTORY_BOUNDS,
     ),
     GoldenQueryCase(
         case_id="en-malformed-area",
@@ -371,6 +400,8 @@ GOLDEN_CASES = (
         expected_ambiguities=(
             AmbiguityExpectation(None, "conflicting or invalid"),
         ),
+        expected_fallback_disposition=FallbackDisposition.FORBIDDEN,
+        expected_fallback_reason=FallbackReason.PARSER_ERROR,
     ),
     GoldenQueryCase(
         case_id="en-not-furnished-apartment",
@@ -668,6 +699,22 @@ def test_golden_query_semantics(case, evaluate_query):
             mismatches.append(
                 _mismatch(case, "PriceBasis", expected_bases, actual_bases)
             )
+    if case.expected_fallback_disposition is not None:
+        decision = decide_search_fallback(result.intent, case.query)
+        if decision.disposition is not case.expected_fallback_disposition:
+            mismatches.append(_mismatch(
+                case,
+                "fallback disposition",
+                case.expected_fallback_disposition,
+                decision.disposition,
+            ))
+        if decision.reason is not case.expected_fallback_reason:
+            mismatches.append(_mismatch(
+                case,
+                "fallback reason",
+                case.expected_fallback_reason,
+                decision.reason,
+            ))
 
     if mismatches:
         pytest.fail("\n".join(mismatches))

@@ -1,11 +1,26 @@
 import re
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator
 
 
+class SearchQueryParseErrorKind(str, Enum):
+    INVALID_SYNTAX = "invalid_syntax"
+    CONFLICTING_VALUES = "conflicting_values"
+
+
 class SearchQueryParseError(ValueError):
     """Raised when user search text contains invalid structured filter syntax."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: SearchQueryParseErrorKind = SearchQueryParseErrorKind.INVALID_SYNTAX,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class SearchFilters(BaseModel):
@@ -67,7 +82,7 @@ PAYMENT_METHOD_ALIASES: dict[str, str] = {
     "installment plan": "Installment",
 }
 
-_PROPERTY_TYPE_ALIASES: dict[str, str] = {
+PROPERTY_TYPE_ALIASES: dict[str, str] = {
     "twin house": "Twin House",
     "twinhouse": "Twin House",
     "town house": "Townhouse",
@@ -85,7 +100,7 @@ _FILTER_VALUE_STARTS = "|".join(
         alias.split()[0]
         for aliases in (
             LOCATION_ALIASES,
-            _PROPERTY_TYPE_ALIASES,
+            PROPERTY_TYPE_ALIASES,
             PAYMENT_METHOD_ALIASES,
         )
         for alias in aliases
@@ -176,7 +191,7 @@ def _normalize_text(text: str) -> str:
 
 
 def _extract_property_type(text: str) -> str | None:
-    return _extract_alias(text, _PROPERTY_TYPE_ALIASES)
+    return _extract_alias(text, PROPERTY_TYPE_ALIASES)
 
 
 def _extract_alias(text: str, aliases: dict[str, str]) -> str | None:
@@ -188,7 +203,8 @@ def _extract_alias(text: str, aliases: dict[str, str]) -> str | None:
 
     if len(matches) > 1:
         raise SearchQueryParseError(
-            f"Conflicting values found: {sorted(matches)}"
+            f"Conflicting values found: {sorted(matches)}",
+            kind=SearchQueryParseErrorKind.CONFLICTING_VALUES,
         )
     return next(iter(matches), None)
 
@@ -215,7 +231,8 @@ def _extract_integer_count(
 
     if len(values) > 1:
         raise SearchQueryParseError(
-            f"Conflicting {field_name} values found: {sorted(values)}"
+            f"Conflicting {field_name} values found: {sorted(values)}",
+            kind=SearchQueryParseErrorKind.CONFLICTING_VALUES,
         )
     return next(iter(values), None)
 
@@ -241,7 +258,8 @@ def _extract_area_limits(
     for field_name, field_values in values.items():
         if len(field_values) > 1:
             raise SearchQueryParseError(
-                f"Conflicting {field_name} values found: {sorted(field_values)}"
+                f"Conflicting {field_name} values found: {sorted(field_values)}",
+                kind=SearchQueryParseErrorKind.CONFLICTING_VALUES,
             )
 
     price_text = list(text)
@@ -298,7 +316,8 @@ def _extract_first_money_match(text: str, patterns: list[str]) -> Decimal | None
 
     if len(values) > 1:
         raise SearchQueryParseError(
-            f"Conflicting money values found: {sorted(values)}"
+            f"Conflicting money values found: {sorted(values)}",
+            kind=SearchQueryParseErrorKind.CONFLICTING_VALUES,
         )
     return next(iter(values), None)
 
@@ -333,7 +352,8 @@ def _extract_payment_method(text: str) -> str | None:
 
     if len(matches) > 1:
         raise SearchQueryParseError(
-            f"Conflicting payment methods found: {sorted(matches)}"
+            f"Conflicting payment methods found: {sorted(matches)}",
+            kind=SearchQueryParseErrorKind.CONFLICTING_VALUES,
         )
     return next(iter(matches), None)
 
@@ -352,6 +372,7 @@ def _extract_min_installment_years(text: str) -> Decimal | None:
 
     if len(values) > 1:
         raise SearchQueryParseError(
-            f"Conflicting installment year values found: {sorted(values)}"
+            f"Conflicting installment year values found: {sorted(values)}",
+            kind=SearchQueryParseErrorKind.CONFLICTING_VALUES,
         )
     return next(iter(values), None)
