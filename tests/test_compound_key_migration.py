@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from io import StringIO
@@ -32,6 +33,20 @@ RECONCILIATION_ERROR = (
 class MigrationDatabase:
     config: Config
     engine: Engine
+
+
+@pytest.fixture(autouse=True)
+def preserve_existing_logger_states() -> Iterator[None]:
+    logger_states = {
+        logger: logger.disabled
+        for logger in logging.Logger.manager.loggerDict.values()
+        if isinstance(logger, logging.Logger)
+    }
+    try:
+        yield
+    finally:
+        for logger, disabled in logger_states.items():
+            logger.disabled = disabled
 
 
 @pytest.fixture
