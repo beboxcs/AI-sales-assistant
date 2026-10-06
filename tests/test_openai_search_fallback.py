@@ -54,18 +54,26 @@ def _proposal(text="New Cairo"):
     )
 
 
-def _provider(*, response=None, error=None, model="gpt-6-luna"):
+def _provider(
+    *,
+    response=None,
+    error=None,
+    model="gpt-6-luna",
+    max_output_tokens=2048,
+):
     responses = FakeResponses(response=response, error=error)
     return OpenAISearchFallbackProvider(
         client=FakeClient(responses),
         model=model,
+        max_output_tokens=max_output_tokens,
     ), responses
 
 
 def test_provider_sends_only_minimal_structured_request():
     text = "New Cairo for company 7"
     provider, responses = _provider(
-        response=SimpleNamespace(status="completed", output_parsed=_proposal(text))
+        response=SimpleNamespace(status="completed", output_parsed=_proposal(text)),
+        max_output_tokens=1536,
     )
 
     provider.propose_search(request=SearchFallbackProviderRequest(text=text))
@@ -75,8 +83,16 @@ def test_provider_sends_only_minimal_structured_request():
     assert call["model"] == "gpt-6-luna"
     assert call["text_format"] is UntrustedSearchProposal
     assert call["store"] is False
+    assert call["max_output_tokens"] == 1536
     assert call["input"] == text
-    assert set(call) == {"model", "instructions", "input", "text_format", "store"}
+    assert set(call) == {
+        "model",
+        "instructions",
+        "input",
+        "text_format",
+        "store",
+        "max_output_tokens",
+    }
     assert call["instructions"].strip()
     assert text not in call["instructions"]
 
@@ -157,6 +173,7 @@ def test_adapter_repr_does_not_expose_injected_client_secret():
     adapter = OpenAISearchFallbackProvider(
         client=FakeClient(FakeResponses(), secret=secret),
         model="gpt-6-luna",
+        max_output_tokens=2048,
     )
 
     assert secret not in repr(adapter)

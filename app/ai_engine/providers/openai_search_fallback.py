@@ -20,9 +20,16 @@ Return only the structured schema with no prose.
 
 
 class OpenAISearchFallbackProvider:
-    def __init__(self, *, client: OpenAI, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        client: OpenAI,
+        model: str,
+        max_output_tokens: int,
+    ) -> None:
         self._client = client
         self._model = model
+        self._max_output_tokens = max_output_tokens
 
     def propose_search(
         self,
@@ -36,6 +43,7 @@ class OpenAISearchFallbackProvider:
                 input=request.text,
                 text_format=UntrustedSearchProposal,
                 store=False,
+                max_output_tokens=self._max_output_tokens,
             )
         except APITimeoutError:
             raise SearchFallbackProviderTimeoutError(
