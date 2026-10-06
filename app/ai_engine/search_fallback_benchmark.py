@@ -53,6 +53,21 @@ class SearchFallbackBenchmarkCase:
 
 
 @dataclass(frozen=True)
+class SearchFallbackBenchmarkRunConfiguration:
+    timeout_seconds: int
+    max_retries: int
+    context_window_tokens: int
+    max_input_tokens_per_call: int
+    max_output_tokens: int
+    repetitions: int
+    max_provider_calls: int
+    local_budget_cap_usd: str
+    input_cost_per_million_tokens_usd: str
+    output_cost_per_million_tokens_usd: str
+    estimated_worst_case_cost_usd: str
+
+
+@dataclass(frozen=True)
 class SearchFallbackBenchmarkMetadata:
     report_schema_version: str
     dataset_version: str
@@ -63,6 +78,7 @@ class SearchFallbackBenchmarkMetadata:
     sampling_configuration: str
     repetition_id: str
     caller_supplied_timestamp: str | None = None
+    run_configuration: SearchFallbackBenchmarkRunConfiguration | None = None
 
 
 @dataclass(frozen=True)
